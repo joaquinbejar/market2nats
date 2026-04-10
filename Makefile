@@ -160,16 +160,14 @@ bench-clean:
 
 .PHONY: killall
 killall:
-	@echo "Killing processes on CTE ports (8080, 8081, 8082)..."
-	@for port in 8080 8081 8082; do \
-		pid=$$(lsof -ti :$$port 2>/dev/null); \
-		if [ -n "$$pid" ]; then \
-			echo "  Port $$port: killing PID $$pid"; \
-			kill -9 $$pid 2>/dev/null || true; \
-		else \
-			echo "  Port $$port: free"; \
-		fi; \
-	done
+	@echo "Killing market2nats processes (port 8080)..."
+	@pid=$$(lsof -ti :8080 2>/dev/null); \
+	if [ -n "$$pid" ]; then \
+		echo "  Port 8080: killing PID $$pid"; \
+		kill -9 $$pid 2>/dev/null || true; \
+	else \
+		echo "  Port 8080: free"; \
+	fi
 	@echo "Done."
 
 .PHONY: workflow-coverage
