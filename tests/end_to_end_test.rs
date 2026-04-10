@@ -268,7 +268,7 @@ async fn test_end_to_end_mock_to_nats() {
     );
 
     // Read first message and verify sequence was assigned.
-    let msg = stream.direct_get(1).await.unwrap();
+    let msg = stream.get_raw_message(1).await.unwrap();
     let envelope: MarketDataEnvelope = serde_json::from_slice(&msg.payload).unwrap();
     assert_eq!(envelope.venue.as_str(), "mock_venue");
     // Sequence should be 1 (first event for this stream key).
@@ -454,7 +454,7 @@ async fn test_end_to_end_sequence_assignment() {
 
     let mut sequences = Vec::new();
     for seq_num in 1..=msg_count {
-        if let Ok(msg) = stream.direct_get(seq_num).await {
+        if let Ok(msg) = stream.get_raw_message(seq_num).await {
             let envelope: MarketDataEnvelope = serde_json::from_slice(&msg.payload).unwrap();
             sequences.push(envelope.sequence.value());
         }

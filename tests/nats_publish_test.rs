@@ -219,7 +219,7 @@ async fn test_publish_trade_protobuf() {
     // Consume the message directly from the stream.
     let js = jetstream::new(client);
     let stream = js.get_stream(&stream_name).await.unwrap();
-    let msg = stream.direct_get(1).await.unwrap();
+    let msg = stream.get_raw_message(1).await.unwrap();
 
     assert!(!msg.payload.is_empty());
     let ct: Option<String> = msg.headers.get("Content-Type").map(|v| v.to_string());
@@ -247,7 +247,7 @@ async fn test_publish_trade_json_roundtrip() {
     // Read back and deserialize.
     let js = jetstream::new(client);
     let stream = js.get_stream(&stream_name).await.unwrap();
-    let msg = stream.direct_get(1).await.unwrap();
+    let msg = stream.get_raw_message(1).await.unwrap();
 
     let deserialized: MarketDataEnvelope = serde_json::from_slice(&msg.payload).unwrap();
     assert_eq!(deserialized.venue.as_str(), "kraken");
@@ -458,7 +458,7 @@ async fn test_protobuf_roundtrip_through_nats() {
     // Read back and decode protobuf.
     let js = jetstream::new(client);
     let stream = js.get_stream(&stream_name).await.unwrap();
-    let msg = stream.direct_get(1).await.unwrap();
+    let msg = stream.get_raw_message(1).await.unwrap();
 
     let pb_envelope = proto::pb::MarketDataEnvelope::decode(msg.payload.as_ref()).unwrap();
     assert_eq!(pb_envelope.venue, "binance");
@@ -498,7 +498,7 @@ async fn test_publish_large_l2_snapshot() {
     // Read back and verify L2 data.
     let js = jetstream::new(client);
     let stream = js.get_stream(&stream_name).await.unwrap();
-    let msg = stream.direct_get(1).await.unwrap();
+    let msg = stream.get_raw_message(1).await.unwrap();
 
     let deserialized: MarketDataEnvelope = serde_json::from_slice(&msg.payload).unwrap();
     if let market2nats::domain::MarketDataPayload::L2Update(l2) = &deserialized.payload {
