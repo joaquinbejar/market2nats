@@ -61,17 +61,23 @@ jobs:
       - name: Start NATS with JetStream
         run: |
           docker run -d --name nats-test \
-            -p 4222:4222 \
+            --network host \
             nats:2.10-alpine \
-            --jetstream --store_dir /data --max_payload 1048576
+            -js
 
-      - name: Wait for NATS to be ready
+      - name: Wait for NATS JetStream to be ready
         run: |
           for i in $(seq 1 30); do
-            nc -z localhost 4222 && echo "NATS is ready" && exit 0
+            if nc -z localhost 4222 2>/dev/null; then
+              echo "NATS is ready"
+              docker logs nats-test 2>&1 | tail -5
+              exit 0
+            fi
             sleep 1
           done
-          echo "NATS did not start" && exit 1
+          echo "NATS did not start"
+          docker logs nats-test 2>&1
+          exit 1
 
       - name: Run integration tests
         run: make integration-test
