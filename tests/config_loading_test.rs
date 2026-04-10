@@ -5,13 +5,16 @@
 use std::io::Write;
 
 use market2nats::config;
-use market2nats::config::validation::{validate_config, ConfigValidationError};
 
 /// Test loading the default relay.toml config file.
 #[test]
 fn test_load_default_config() {
     let result = config::load_config("config/relay.toml");
-    assert!(result.is_ok(), "failed to load relay.toml: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "failed to load relay.toml: {:?}",
+        result.err()
+    );
 
     let cfg = result.unwrap();
     assert_eq!(cfg.service.name, "market-data-relay");
@@ -189,10 +192,7 @@ name = "broken"
     let result = config::load_config(tmp.path().to_str().unwrap());
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("parse"),
-        "expected parse error, got: {err}"
-    );
+    assert!(err.contains("parse"), "expected parse error, got: {err}");
 }
 
 /// Test config with nonexistent file.

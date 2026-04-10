@@ -12,21 +12,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_nats::jetstream;
-use futures_util::StreamExt;
-use rust_decimal_macros::dec;
 use tokio::sync::{mpsc, watch};
 
 use market2nats::application::ports::{NatsPublisher, Subscription, VenueAdapter, VenueError};
-use market2nats::application::{
-    HealthMonitor, SequenceTracker, StreamRouter, SubscriptionManager,
-};
+use market2nats::application::{HealthMonitor, SequenceTracker, StreamRouter, SubscriptionManager};
 use market2nats::config::model::{
     CircuitBreakerConfig, ConnectionConfig, StreamConfig, VenueConfig,
 };
-use market2nats::domain::{
-    CanonicalSymbol, InstrumentId, MarketDataEnvelope, MarketDataPayload, MarketDataType, Price,
-    Quantity, Sequence, Side, Timestamp, Trade, VenueId,
-};
+use market2nats::domain::{MarketDataEnvelope, VenueId};
 use market2nats::infrastructure::nats::JetStreamPublisher;
 use market2nats::serialization::{self, SerializationFormat};
 
@@ -189,10 +182,8 @@ async fn test_end_to_end_mock_to_nats() {
     let (event_tx, mut event_rx) = mpsc::channel(1000);
 
     // Spawn venue task.
-    let sub_manager = SubscriptionManager::new(
-        Arc::clone(&health_monitor),
-        Arc::clone(&sequence_tracker),
-    );
+    let sub_manager =
+        SubscriptionManager::new(Arc::clone(&health_monitor), Arc::clone(&sequence_tracker));
 
     let venue_config = mock_venue_config("mock_venue");
     let venue_handle = sub_manager.spawn_venue_task(
@@ -262,7 +253,10 @@ async fn test_end_to_end_multiple_venues() {
     publisher
         .ensure_stream(&StreamConfig {
             name: stream_name.clone(),
-            subjects: vec![format!("market.venue_a.*.trade"), format!("market.venue_b.*.trade")],
+            subjects: vec![
+                format!("market.venue_a.*.trade"),
+                format!("market.venue_b.*.trade"),
+            ],
             storage: "memory".to_owned(),
             retention: "limits".to_owned(),
             max_age_secs: 60,
@@ -293,10 +287,8 @@ async fn test_end_to_end_multiple_venues() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (event_tx, mut event_rx) = mpsc::channel(1000);
 
-    let sub_manager = SubscriptionManager::new(
-        Arc::clone(&health_monitor),
-        Arc::clone(&sequence_tracker),
-    );
+    let sub_manager =
+        SubscriptionManager::new(Arc::clone(&health_monitor), Arc::clone(&sequence_tracker));
 
     let h_a = sub_manager.spawn_venue_task(
         Box::new(adapter_a),
@@ -388,10 +380,8 @@ async fn test_end_to_end_sequence_assignment() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (event_tx, mut event_rx) = mpsc::channel(1000);
 
-    let sub_manager = SubscriptionManager::new(
-        Arc::clone(&health_monitor),
-        Arc::clone(&sequence_tracker),
-    );
+    let sub_manager =
+        SubscriptionManager::new(Arc::clone(&health_monitor), Arc::clone(&sequence_tracker));
 
     let venue_handle = sub_manager.spawn_venue_task(
         Box::new(adapter),

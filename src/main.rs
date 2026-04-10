@@ -5,12 +5,10 @@ use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
 use market2nats::application::ports::NatsPublisher;
-use market2nats::application::{
-    HealthMonitor, SequenceTracker, StreamRouter, SubscriptionManager,
-};
+use market2nats::application::{HealthMonitor, SequenceTracker, StreamRouter, SubscriptionManager};
 use market2nats::config;
-use market2nats::infrastructure::http::{start_http_server, HttpState};
-use market2nats::infrastructure::nats::{connect_nats, setup_jetstream, JetStreamPublisher};
+use market2nats::infrastructure::http::{HttpState, start_http_server};
+use market2nats::infrastructure::nats::{JetStreamPublisher, connect_nats, setup_jetstream};
 use market2nats::infrastructure::ws::GenericWsAdapter;
 use market2nats::serialization::{self, SerializationFormat};
 
@@ -188,7 +186,7 @@ async fn main() -> Result<(), ServiceError> {
 /// Initializes the tracing subscriber.
 fn init_tracing(log_level: &str, log_format: &str) {
     use tracing_subscriber::prelude::*;
-    use tracing_subscriber::{fmt, EnvFilter};
+    use tracing_subscriber::{EnvFilter, fmt};
 
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));

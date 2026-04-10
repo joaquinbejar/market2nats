@@ -22,7 +22,11 @@ pub async fn connect_nats() -> async_nats::Client {
         .connection_timeout(Duration::from_secs(5))
         .connect(&url)
         .await
-        .unwrap_or_else(|e| panic!("cannot connect to NATS at {url}: {e}. Is NATS running? Try: docker compose up -d"))
+        .unwrap_or_else(|e| {
+            panic!(
+                "cannot connect to NATS at {url}: {e}. Is NATS running? Try: docker compose up -d"
+            )
+        })
 }
 
 /// Creates a unique stream name to avoid collisions between tests.

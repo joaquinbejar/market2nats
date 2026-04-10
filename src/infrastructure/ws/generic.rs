@@ -4,7 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use tracing::{debug, instrument, warn};
 
 use crate::application::ports::{Subscription, VenueAdapter, VenueError};
@@ -464,10 +464,10 @@ impl VenueAdapter for GenericWsAdapter {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), VenueError>> + Send + '_>>
     {
         Box::pin(async move {
-            if let Some(mut ws) = self.ws.take() {
-                if let Err(e) = ws.close(None).await {
-                    warn!(venue = %self.venue_id, error = %e, "error during disconnect");
-                }
+            if let Some(mut ws) = self.ws.take()
+                && let Err(e) = ws.close(None).await
+            {
+                warn!(venue = %self.venue_id, error = %e, "error during disconnect");
             }
             Ok(())
         })
@@ -485,15 +485,11 @@ impl VenueAdapter for GenericWsAdapter {
 fn extract_decimal(value: &serde_json::Value, keys: &[&str]) -> Option<Decimal> {
     for key in keys {
         if let Some(v) = value.get(*key) {
-            if let Some(s) = v.as_str() {
-                if let Ok(d) = s.parse::<Decimal>() {
-                    return Some(d);
-                }
+            if let Some(d) = v.as_str().and_then(|s| s.parse::<Decimal>().ok()) {
+                return Some(d);
             }
-            if let Some(n) = v.as_f64() {
-                if let Ok(d) = Decimal::try_from(n) {
-                    return Some(d);
-                }
+            if let Some(d) = v.as_f64().and_then(|n| Decimal::try_from(n).ok()) {
+                return Some(d);
             }
         }
     }
@@ -520,21 +516,19 @@ fn parse_price_levels(value: &serde_json::Value, keys: &[&str]) -> Vec<(Price, Q
         if let Some(arr) = value.get(*key).and_then(|v| v.as_array()) {
             let mut levels = Vec::with_capacity(arr.len());
             for item in arr {
-                if let Some(inner) = item.as_array() {
-                    if inner.len() >= 2 {
-                        let price = inner[0]
-                            .as_str()
-                            .and_then(|s| s.parse::<Decimal>().ok())
-                            .or_else(|| inner[0].as_f64().and_then(|f| Decimal::try_from(f).ok()))
-                            .and_then(|d| Price::try_new(d).ok());
-                        let qty = inner[1]
-                            .as_str()
-                            .and_then(|s| s.parse::<Decimal>().ok())
-                            .or_else(|| inner[1].as_f64().and_then(|f| Decimal::try_from(f).ok()))
-                            .and_then(|d| Quantity::try_new(d).ok());
-                        if let (Some(p), Some(q)) = (price, qty) {
-                            levels.push((p, q));
-                        }
+                if let Some(inner) = item.as_array().filter(|a| a.len() >= 2) {
+                    let price = inner[0]
+                        .as_str()
+                        .and_then(|s| s.parse::<Decimal>().ok())
+                        .or_else(|| inner[0].as_f64().and_then(|f| Decimal::try_from(f).ok()))
+                        .and_then(|d| Price::try_new(d).ok());
+                    let qty = inner[1]
+                        .as_str()
+                        .and_then(|s| s.parse::<Decimal>().ok())
+                        .or_else(|| inner[1].as_f64().and_then(|f| Decimal::try_from(f).ok()))
+                        .and_then(|d| Quantity::try_new(d).ok());
+                    if let (Some(p), Some(q)) = (price, qty) {
+                        levels.push((p, q));
                     }
                 }
             }

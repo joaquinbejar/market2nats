@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use market2nats::application::HealthMonitor;
-use market2nats::domain::{ConnectionState, ServiceHealth, VenueId};
-use market2nats::infrastructure::http::{start_http_server, HttpState};
+use market2nats::domain::{ConnectionState, VenueId};
+use market2nats::infrastructure::http::{HttpState, start_http_server};
 
 /// Finds a free TCP port for testing.
 fn free_port() -> u16 {
@@ -241,7 +241,10 @@ async fn test_health_response_schema() {
 
     // Verify all expected fields exist and have correct types.
     assert!(body["status"].is_string(), "status must be a string");
-    assert!(body["nats_connected"].is_boolean(), "nats_connected must be a boolean");
+    assert!(
+        body["nats_connected"].is_boolean(),
+        "nats_connected must be a boolean"
+    );
     assert!(body["venues"].is_array(), "venues must be an array");
 
     for venue in body["venues"].as_array().unwrap() {

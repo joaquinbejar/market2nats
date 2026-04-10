@@ -308,9 +308,11 @@ mod tests {
         let mut config = minimal_valid_config();
         config.venues[0].enabled = false;
         let errors = validate_config(&config);
-        assert!(errors
-            .iter()
-            .any(|e| e.to_string().contains("at least one venue")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.to_string().contains("at least one venue"))
+        );
     }
 
     #[test]
@@ -318,9 +320,11 @@ mod tests {
         let mut config = minimal_valid_config();
         config.nats.consumers[0].stream = "NONEXISTENT".to_owned();
         let errors = validate_config(&config);
-        assert!(errors
-            .iter()
-            .any(|e| e.to_string().contains("unknown stream")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.to_string().contains("unknown stream"))
+        );
     }
 
     #[test]
@@ -328,9 +332,11 @@ mod tests {
         let mut config = minimal_valid_config();
         config.venues[0].subscriptions[0].data_types = vec!["invalid".to_owned()];
         let errors = validate_config(&config);
-        assert!(errors
-            .iter()
-            .any(|e| e.to_string().contains("unknown type")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.to_string().contains("unknown type"))
+        );
     }
 
     #[test]
@@ -347,8 +353,10 @@ mod tests {
         let mut config = minimal_valid_config();
         config.nats.urls = vec!["http://wrong".to_owned()];
         let errors = validate_config(&config);
-        assert!(errors
-            .iter()
-            .any(|e| e.to_string().contains("invalid scheme")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.to_string().contains("invalid scheme"))
+        );
     }
 }

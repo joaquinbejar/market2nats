@@ -5,8 +5,6 @@
 
 mod helpers;
 
-use std::time::Duration;
-
 use async_nats::jetstream;
 use futures_util::StreamExt;
 
@@ -32,11 +30,7 @@ async fn test_jetstream_available() {
 
     // Account info should be available if JetStream is enabled.
     let info = js.query_account().await;
-    assert!(
-        info.is_ok(),
-        "JetStream not available: {:?}",
-        info.err()
-    );
+    assert!(info.is_ok(), "JetStream not available: {:?}", info.err());
 }
 
 /// Test creating a JetStream stream via our publisher.
@@ -65,7 +59,7 @@ async fn test_create_stream() {
 
     // Verify the stream exists.
     let js = publisher.jetstream_context();
-    let mut stream = js.get_stream(&stream_name).await;
+    let stream = js.get_stream(&stream_name).await;
     assert!(
         stream.is_ok(),
         "stream not found after creation: {:?}",

@@ -5,8 +5,6 @@
 
 mod helpers;
 
-use std::time::Duration;
-
 use async_nats::jetstream;
 use futures_util::StreamExt;
 
@@ -45,7 +43,8 @@ async fn test_publish_trade_protobuf() {
 
     let envelope = helpers::sample_trade_envelope("binance", "BTCUSDT", "BTC/USDT", 1);
     let subject = format!("{stream_name}.binance.btc-usdt.trade");
-    let payload = serialization::serialize_envelope(&envelope, SerializationFormat::Protobuf).unwrap();
+    let payload =
+        serialization::serialize_envelope(&envelope, SerializationFormat::Protobuf).unwrap();
     let ct = serialization::content_type(SerializationFormat::Protobuf);
 
     publisher.publish(&subject, &payload, ct).await.unwrap();
@@ -105,7 +104,13 @@ async fn test_publish_all_data_types() {
         helpers::sample_liquidation_envelope("binance", "BTCUSDT", "BTC/USDT", 5),
     ];
 
-    let data_types = ["trade", "ticker", "l2_orderbook", "funding_rate", "liquidation"];
+    let data_types = [
+        "trade",
+        "ticker",
+        "l2_orderbook",
+        "funding_rate",
+        "liquidation",
+    ];
 
     for (envelope, dt) in envelopes.iter().zip(data_types.iter()) {
         let subject = format!("{stream_name}.binance.btc-usdt.{dt}");
@@ -153,7 +158,12 @@ async fn test_publish_and_pull_consume() {
         .await
         .unwrap();
 
-    let mut messages = consumer.fetch().max_messages(count as usize).messages().await.unwrap();
+    let mut messages = consumer
+        .fetch()
+        .max_messages(count as usize)
+        .messages()
+        .await
+        .unwrap();
     let mut received = 0u64;
     while let Some(Ok(msg)) = messages.next().await {
         let envelope: MarketDataEnvelope = serde_json::from_slice(&msg.payload).unwrap();
@@ -218,8 +228,7 @@ async fn test_subject_routing_isolation() {
 
     for i in 1..=3 {
         let trade = helpers::sample_trade_envelope("binance", "BTCUSDT", "BTC/USDT", i);
-        let payload =
-            serialization::serialize_envelope(&trade, SerializationFormat::Json).unwrap();
+        let payload = serialization::serialize_envelope(&trade, SerializationFormat::Json).unwrap();
         publisher
             .publish(&format!("{prefix}.binance.btc-usdt.trade"), &payload, ct)
             .await
@@ -231,11 +240,7 @@ async fn test_subject_routing_isolation() {
         let payload =
             serialization::serialize_envelope(&ticker, SerializationFormat::Json).unwrap();
         publisher
-            .publish(
-                &format!("{prefix}.binance.btc-usdt.ticker"),
-                &payload,
-                ct,
-            )
+            .publish(&format!("{prefix}.binance.btc-usdt.ticker"), &payload, ct)
             .await
             .unwrap();
     }
@@ -243,7 +248,10 @@ async fn test_subject_routing_isolation() {
     // Verify isolation.
     let mut trades = js.get_stream(&trades_stream).await.unwrap();
     let trades_info = trades.info().await.unwrap();
-    assert_eq!(trades_info.state.messages, 3, "trades stream should have 3 messages");
+    assert_eq!(
+        trades_info.state.messages, 3,
+        "trades stream should have 3 messages"
+    );
 
     let mut tickers = js.get_stream(&ticker_stream).await.unwrap();
     let tickers_info = tickers.info().await.unwrap();
@@ -309,8 +317,7 @@ async fn test_publish_large_l2_snapshot() {
 
     let envelope = helpers::sample_l2_envelope("binance", "BTCUSDT", "BTC/USDT", 1, true);
     let subject = format!("{stream_name}.binance.btc-usdt.l2_orderbook");
-    let payload =
-        serialization::serialize_envelope(&envelope, SerializationFormat::Json).unwrap();
+    let payload = serialization::serialize_envelope(&envelope, SerializationFormat::Json).unwrap();
     let ct = serialization::content_type(SerializationFormat::Json);
 
     publisher.publish(&subject, &payload, ct).await.unwrap();
