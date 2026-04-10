@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package market_data;
+
+message MarketDataEnvelope {
+  string venue = 1;
+  string instrument = 2;
+  string canonical_symbol = 3;
+  string data_type = 4;
+  uint64 received_at = 5;
+  optional uint64 exchange_timestamp = 6;
+  uint64 sequence = 7;
+  oneof payload {
+    TradePayload trade = 10;
+    TickerPayload ticker = 11;
+    L2UpdatePayload l2_update = 12;
+    FundingRatePayload funding_rate = 13;
+    LiquidationPayload liquidation = 14;
+  }
+}
+
+message TradePayload {
+  string price = 1;
+  string quantity = 2;
+  string side = 3;
+  optional string trade_id = 4;
+}
+
+message TickerPayload {
+  string bid_price = 1;
+  string bid_qty = 2;
+  string ask_price = 3;
+  string ask_qty = 4;
+  string last_price = 5;
+}
+
+message L2UpdatePayload {
+  repeated PriceLevel bids = 1;
+  repeated PriceLevel asks = 2;
+  bool is_snapshot = 3;
+}
+
+message PriceLevel {
+  string price = 1;
+  string quantity = 2;
+}
+
+message FundingRatePayload {
+  string rate = 1;
+  optional string predicted_rate = 2;
+  uint64 next_funding_at = 3;
+}
+
+message LiquidationPayload {
+  string side = 1;
+  string price = 2;
+  string quantity = 3;
+}

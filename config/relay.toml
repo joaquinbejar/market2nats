@@ -1,0 +1,105 @@
+[service]
+name = "market-data-relay"
+log_level = "info"
+log_format = "json"
+shutdown_timeout_ms = 5000
+ 
+[nats]
+urls = ["nats://localhost:4222"]
+connect_timeout_ms = 5000
+reconnect_buffer_size = 8388608
+max_reconnects = -1
+ping_interval_secs = 20
+auth = "none"
+ 
+[nats.tls]
+enabled = false
+ 
+# ── Streams ──────────────────────────────────
+ 
+[[nats.streams]]
+name = "MARKET_TRADES"
+subjects = ["market.*.*.trade"]
+storage = "file"
+retention = "limits"
+max_age_secs = 86400
+max_bytes = 1073741824
+max_msg_size = 65536
+discard = "old"
+num_replicas = 1
+duplicate_window_secs = 120
+ 
+[[nats.streams]]
+name = "MARKET_TICKER"
+subjects = ["market.*.*.ticker"]
+storage = "memory"
+retention = "limits"
+max_age_secs = 300
+num_replicas = 1
+ 
+[[nats.streams]]
+name = "MARKET_ORDERBOOK"
+subjects = ["market.*.*.l2_orderbook"]
+storage = "file"
+retention = "limits"
+max_age_secs = 3600
+max_bytes = 5368709120
+num_replicas = 1
+ 
+[[nats.streams]]
+name = "MARKET_FUNDING"
+subjects = ["market.*.*.funding_rate"]
+storage = "file"
+retention = "limits"
+max_age_secs = 604800
+num_replicas = 1
+ 
+[[nats.streams]]
+name = "MARKET_LIQUIDATIONS"
+subjects = ["market.*.*.liquidation"]
+storage = "file"
+retention = "interest"
+max_age_secs = 86400
+num_replicas = 1
+ 
+# ── Consumers ────────────────────────────────
+ 
+[[nats.consumers]]
+stream = "MARKET_TRADES"
+name = "analytics-trades"
+durable = true
+ack_policy = "explicit"
+ack_wait_secs = 30
+max_deliver = 5
+deliver_policy = "all"
+max_ack_pending = 1000
+ 
+# ── Venues ───────────────────────────────────
+ 
+[[venues]]
+id = "binance"
+adapter = "binance"
+enabled = true
+ 
+[venues.connection]
+ws_url = "wss://stream.binance.com:9443/ws"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 30
+pong_timeout_secs = 10
+ 
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+ 
+[[venues.subscriptions]]
+instrument = "BTCUSDT"
+canonical_symbol = "BTC/USDT"
+data_types = ["trade", "ticker", "l2_orderbook", "funding_rate"]
+ 
+[[venues.subscriptions]]
+instrument = "ETHUSDT"
+canonical_symbol = "ETH/USDT"
+data_types = ["trade", "ticker", "l2_orderbook", "funding_rate", "liquidation"]
