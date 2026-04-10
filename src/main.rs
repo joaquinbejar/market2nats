@@ -247,7 +247,9 @@ fn create_adapter(
             } else {
                 // Create a minimal generic adapter for venues without explicit generic_ws config.
                 let ws_config = market2nats::config::model::GenericWsConfig {
-                    subscribe_template: String::new(),
+                    subscribe_template: None,
+                    batch_subscribe_template: None,
+                    stream_format: "${instrument}@${channel}".to_owned(),
                     channel_map: std::collections::HashMap::new(),
                     message_format: "json".to_owned(),
                 };

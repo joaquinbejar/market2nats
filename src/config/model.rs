@@ -222,8 +222,16 @@ pub struct CircuitBreakerConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenericWsConfig {
-    /// Template for subscribe messages. Supports `${channel}` and `${instrument}` placeholders.
-    pub subscribe_template: String,
+    /// Template for per-stream subscribe messages. Supports `${channel}` and `${instrument}`.
+    /// Used when `batch_subscribe_template` is not set.
+    pub subscribe_template: Option<String>,
+    /// Template for batch subscribe. Supports `${params}` (JSON array of stream names).
+    /// Each stream name is built as `<instrument>@<channel>` from the stream_format.
+    /// Example: `{"method":"SUBSCRIBE","params":${params},"id":1}`
+    pub batch_subscribe_template: Option<String>,
+    /// Format for individual stream names in batch mode. Default: `${instrument}@${channel}`.
+    #[serde(default = "default_stream_format")]
+    pub stream_format: String,
     /// Map from MarketDataType subject strings to venue-specific channel names.
     pub channel_map: std::collections::HashMap<String, String>,
     /// Message format: "json" or "binary".
@@ -378,4 +386,9 @@ fn default_half_open_max() -> u32 {
 #[inline]
 fn default_message_format() -> String {
     "json".to_owned()
+}
+
+#[inline]
+fn default_stream_format() -> String {
+    "${instrument}@${channel}".to_owned()
 }

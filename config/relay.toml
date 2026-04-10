@@ -3,7 +3,7 @@ name = "market2nats"
 log_level = "info"
 log_format = "json"
 shutdown_timeout_ms = 5000
- 
+
 [nats]
 urls = ["nats://localhost:4222"]
 connect_timeout_ms = 5000
@@ -13,12 +13,12 @@ ping_interval_secs = 20
 auth = "userpass"
 username = "${NATS_USER}"
 password = "${NATS_PASSWORD}"
- 
+
 [nats.tls]
 enabled = false
- 
+
 # ── Streams ──────────────────────────────────
- 
+
 [[nats.streams]]
 name = "MARKET_TRADES"
 subjects = ["market.*.*.trade"]
@@ -30,7 +30,7 @@ max_msg_size = 65536
 discard = "old"
 num_replicas = 1
 duplicate_window_secs = 120
- 
+
 [[nats.streams]]
 name = "MARKET_TICKER"
 subjects = ["market.*.*.ticker"]
@@ -38,7 +38,7 @@ storage = "memory"
 retention = "limits"
 max_age_secs = 300
 num_replicas = 1
- 
+
 [[nats.streams]]
 name = "MARKET_ORDERBOOK"
 subjects = ["market.*.*.l2_orderbook"]
@@ -47,7 +47,7 @@ retention = "limits"
 max_age_secs = 3600
 max_bytes = 5368709120
 num_replicas = 1
- 
+
 [[nats.streams]]
 name = "MARKET_FUNDING"
 subjects = ["market.*.*.funding_rate"]
@@ -55,7 +55,7 @@ storage = "file"
 retention = "limits"
 max_age_secs = 604800
 num_replicas = 1
- 
+
 [[nats.streams]]
 name = "MARKET_LIQUIDATIONS"
 subjects = ["market.*.*.liquidation"]
@@ -63,9 +63,9 @@ storage = "file"
 retention = "interest"
 max_age_secs = 86400
 num_replicas = 1
- 
+
 # ── Consumers ────────────────────────────────
- 
+
 [[nats.consumers]]
 stream = "MARKET_TRADES"
 name = "analytics-trades"
@@ -75,14 +75,20 @@ ack_wait_secs = 30
 max_deliver = 5
 deliver_policy = "all"
 max_ack_pending = 1000
- 
-# ── Venues ───────────────────────────────────
- 
+
+# ── Binance Spot ─────────────────────────────
+#
+# Binance spot WebSocket API:
+#   - Combined stream endpoint: wss://stream.binance.com:9443/stream
+#   - Subscribe: {"method":"SUBSCRIBE","params":["<symbol>@<channel>"],"id":1}
+#   - Response: {"stream":"btcusdt@trade","data":{...}}
+#   - Instruments use lowercase in stream names, uppercase in "s" field
+
 [[venues]]
 id = "binance"
-adapter = "binance"
+adapter = "generic_ws"
 enabled = true
- 
+
 [venues.connection]
 ws_url = "wss://stream.binance.com:9443/ws"
 reconnect_delay_ms = 1000
@@ -90,18 +96,77 @@ max_reconnect_delay_ms = 60000
 max_reconnect_attempts = 0
 ping_interval_secs = 30
 pong_timeout_secs = 10
- 
+
 [venues.circuit_breaker]
 failure_threshold = 5
 reset_timeout_secs = 60
 half_open_max_requests = 2
- 
+
+[venues.generic_ws]
+batch_subscribe_template = '{"method":"SUBSCRIBE","params":${params},"id":1}'
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "trade"
+ticker = "bookTicker"
+l2_orderbook = "depth@100ms"
+
+# Instruments use lowercase for WS stream subscription.
+# The "s" field in responses is uppercase — the adapter handles both.
+
 [[venues.subscriptions]]
-instrument = "BTCUSDT"
+instrument = "btcusdt"
+canonical_symbol = "BTC/USDT"
+data_types = ["trade", "ticker", "l2_orderbook"]
+
+[[venues.subscriptions]]
+instrument = "ethusdt"
+canonical_symbol = "ETH/USDT"
+data_types = ["trade", "ticker", "l2_orderbook"]
+
+# ── Binance USD-M Futures ────────────────────
+#
+# Binance futures WebSocket API:
+#   - Combined stream endpoint: wss://fstream.binance.com/stream
+#   - Same subscribe format as spot
+#   - Funding rate: markPrice stream ("e":"markPriceUpdate", "r"=funding rate)
+#   - Liquidations: forceOrder stream ("e":"forceOrder", "o"={...})
+
+[[venues]]
+id = "binance-futures"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://fstream.binance.com/ws"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 30
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+batch_subscribe_template = '{"method":"SUBSCRIBE","params":${params},"id":1}'
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "trade"
+ticker = "bookTicker"
+l2_orderbook = "depth@100ms"
+funding_rate = "markPrice"
+liquidation = "forceOrder"
+
+[[venues.subscriptions]]
+instrument = "btcusdt"
 canonical_symbol = "BTC/USDT"
 data_types = ["trade", "ticker", "l2_orderbook", "funding_rate"]
- 
+
 [[venues.subscriptions]]
-instrument = "ETHUSDT"
+instrument = "ethusdt"
 canonical_symbol = "ETH/USDT"
 data_types = ["trade", "ticker", "l2_orderbook", "funding_rate", "liquidation"]

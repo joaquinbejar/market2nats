@@ -5,7 +5,7 @@ use rust_decimal::Decimal;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument, trace, warn};
 
 use crate::application::ports::{Subscription, VenueAdapter, VenueError};
 use crate::config::model::{CircuitBreakerConfig, ConnectionConfig, GenericWsConfig};
@@ -29,7 +29,7 @@ pub struct GenericWsAdapter {
     ws_config: GenericWsConfig,
     circuit_breaker: CircuitBreaker,
     ws: Option<WsStream>,
-    /// Maps venue-local instrument → canonical symbol.
+    /// Maps venue-local instrument (any case) → canonical symbol.
     instrument_map: HashMap<String, String>,
     /// Reverse channel map: venue channel name → MarketDataType.
     reverse_channel_map: HashMap<String, MarketDataType>,
@@ -60,7 +60,37 @@ impl GenericWsAdapter {
         for (data_type_str, channel_name) in &ws_config.channel_map {
             if let Ok(dt) = MarketDataType::from_str_config(data_type_str) {
                 reverse_channel_map.insert(channel_name.clone(), dt);
+                // Also map the base channel name (strip @... suffix used in subscribe).
+                if let Some(base) = channel_name.split('@').next()
+                    && base != channel_name.as_str()
+                {
+                    reverse_channel_map.insert(base.to_owned(), dt);
+                }
             }
+        }
+
+        // Add common Binance event name aliases.
+        // These allow matching response "e" fields to the correct data type.
+        if reverse_channel_map.contains_key("trade") {
+            reverse_channel_map.insert("aggTrade".to_owned(), MarketDataType::Trade);
+        }
+        if reverse_channel_map
+            .values()
+            .any(|dt| *dt == MarketDataType::L2Orderbook)
+        {
+            reverse_channel_map.insert("depthUpdate".to_owned(), MarketDataType::L2Orderbook);
+        }
+        if reverse_channel_map
+            .values()
+            .any(|dt| *dt == MarketDataType::FundingRate)
+        {
+            reverse_channel_map.insert("markPriceUpdate".to_owned(), MarketDataType::FundingRate);
+        }
+        if reverse_channel_map
+            .values()
+            .any(|dt| *dt == MarketDataType::Liquidation)
+        {
+            reverse_channel_map.insert("forceOrder".to_owned(), MarketDataType::Liquidation);
         }
 
         Ok(Self {
@@ -74,54 +104,191 @@ impl GenericWsAdapter {
         })
     }
 
-    /// Builds a subscribe message from the template.
+    /// Builds subscribe message(s) for the given subscriptions.
+    ///
+    /// If `batch_subscribe_template` is set, builds a single message with all streams
+    /// as a JSON array in `${params}`. Otherwise, builds one message per (instrument, channel).
+    fn build_subscribe_messages(&self, subs: &[Subscription]) -> Vec<String> {
+        // Collect all (instrument, channel) pairs.
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for sub in subs {
+            for dt in &sub.data_types {
+                let channel_name = self
+                    .ws_config
+                    .channel_map
+                    .get(dt.as_subject_str())
+                    .cloned()
+                    .unwrap_or_else(|| dt.as_subject_str().to_owned());
+                pairs.push((sub.instrument.clone(), channel_name));
+            }
+        }
+
+        if let Some(batch_tpl) = &self.ws_config.batch_subscribe_template {
+            // Build stream names from stream_format, then inject as JSON array.
+            let stream_names: Vec<String> = pairs
+                .iter()
+                .map(|(inst, ch)| {
+                    self.ws_config
+                        .stream_format
+                        .replace("${instrument}", inst)
+                        .replace("${channel}", ch)
+                })
+                .collect();
+            let params_json = serde_json::to_string(&stream_names).unwrap_or_default();
+            vec![batch_tpl.replace("${params}", &params_json)]
+        } else if let Some(tpl) = &self.ws_config.subscribe_template {
+            // One message per (instrument, channel) pair.
+            pairs
+                .iter()
+                .map(|(inst, ch)| tpl.replace("${instrument}", inst).replace("${channel}", ch))
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Looks up the canonical symbol for an instrument, case-insensitively.
     #[must_use]
-    fn build_subscribe_message(&self, channel: &str, instrument: &str) -> String {
-        self.ws_config
-            .subscribe_template
-            .replace("${channel}", channel)
-            .replace("${instrument}", instrument)
+    fn lookup_canonical(&self, instrument: &str) -> Option<String> {
+        self.instrument_map
+            .get(instrument)
+            .or_else(|| self.instrument_map.get(&instrument.to_uppercase()))
+            .or_else(|| self.instrument_map.get(&instrument.to_lowercase()))
+            .cloned()
     }
 
     /// Attempts to parse a JSON message into domain events.
+    ///
+    /// Handles two formats:
+    /// - Direct: `{"e":"trade","s":"BTCUSDT","p":"50000",...}`
+    /// - Combined stream (Binance): `{"stream":"btcusdt@trade","data":{...}}`
     fn parse_message(&self, text: &str) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        trace!(venue = %self.venue_id, message = %text, "received ws message");
+
         let value: serde_json::Value =
             serde_json::from_str(text).map_err(|e| VenueError::ReceiveFailed {
                 venue: self.venue_id.as_str().to_owned(),
                 reason: format!("json parse error: {e}"),
             })?;
 
-        // Try to extract events from common JSON patterns.
-        // This is a best-effort generic parser — specific venues with complex
-        // formats should use dedicated adapters.
+        // Handle Binance combined stream format: {"stream":"btcusdt@trade","data":{...}}
+        if let Some(stream_name) = value.get("stream").and_then(|v| v.as_str())
+            && let Some(data) = value.get("data")
+        {
+            return self.parse_combined_stream(stream_name, data);
+        }
+
+        // Direct format — try to extract from top-level fields.
+        self.parse_direct_message(&value)
+    }
+
+    /// Parses a Binance combined stream message.
+    ///
+    /// The stream name encodes the instrument and channel: `btcusdt@trade`.
+    fn parse_combined_stream(
+        &self,
+        stream_name: &str,
+        data: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        // Parse stream name: "btcusdt@trade" → instrument="btcusdt", channel="trade"
+        let (instrument_lower, channel) = match stream_name.split_once('@') {
+            Some((inst, ch)) => (inst, ch),
+            None => return Ok(Vec::new()),
+        };
+
+        // Look up data type from channel name.
+        // Binance channels: "trade", "bookTicker", "depth@100ms", "markPrice", "forceOrder"
+        let base_channel = channel.split('@').next().unwrap_or(channel);
+        let data_type = match self.reverse_channel_map.get(base_channel) {
+            Some(dt) => *dt,
+            None => return Ok(Vec::new()),
+        };
+
+        // Look up canonical symbol (the instrument in the response "s" field is uppercase).
+        let instrument_str = data
+            .get("s")
+            .and_then(|v| v.as_str())
+            .unwrap_or(instrument_lower);
+
+        let canonical = match self.lookup_canonical(instrument_str) {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+
+        let instrument_id =
+            InstrumentId::try_new(instrument_str).map_err(|e| VenueError::ReceiveFailed {
+                venue: self.venue_id.as_str().to_owned(),
+                reason: e.to_string(),
+            })?;
+        let canonical_symbol =
+            CanonicalSymbol::try_new(&canonical).map_err(|e| VenueError::ReceiveFailed {
+                venue: self.venue_id.as_str().to_owned(),
+                reason: e.to_string(),
+            })?;
+
+        let mut events = Vec::new();
+        if let Some(payload) = self.try_parse_payload(data_type, data)? {
+            events.push(MarketDataEnvelope {
+                venue: self.venue_id.clone(),
+                instrument: instrument_id,
+                canonical_symbol,
+                data_type,
+                received_at: Timestamp::now(),
+                exchange_timestamp: extract_timestamp(data),
+                sequence: Sequence::new(0), // Will be assigned by SequenceTracker
+                payload,
+            });
+        }
+        Ok(events)
+    }
+
+    /// Parses a direct (non-combined) message.
+    fn parse_direct_message(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
         let mut events = Vec::new();
 
-        // Try to detect data type from a "channel" or "type" field.
-        let channel = value
+        // Try to detect data type from a "channel", "type", or "e" field.
+        let channel_raw = value
             .get("channel")
             .or_else(|| value.get("type"))
             .or_else(|| value.get("e"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
+        // Infer channel from message structure if no explicit event type.
+        // Binance spot bookTicker: has "b","B","a","A","s","u" but no "e" field.
+        let channel = if channel_raw.is_empty()
+            && value.get("b").is_some()
+            && value.get("a").is_some()
+            && value.get("s").is_some()
+        {
+            // Looks like a bookTicker message — find which channel maps to ticker.
+            self.ws_config
+                .channel_map
+                .get("ticker")
+                .map(|s| s.as_str())
+                .unwrap_or("")
+        } else {
+            channel_raw
+        };
+
         let data_type = self.reverse_channel_map.get(channel).copied();
 
         // Try to extract instrument from common fields.
         let instrument_str = value
-            .get("symbol")
-            .or_else(|| value.get("s"))
+            .get("s")
+            .or_else(|| value.get("symbol"))
             .or_else(|| value.get("pair"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let canonical = self
-            .instrument_map
-            .get(instrument_str)
-            .cloned()
-            .unwrap_or_else(|| instrument_str.to_owned());
+        let canonical = self.lookup_canonical(instrument_str);
 
-        if let (Some(dt), false) = (data_type, instrument_str.is_empty()) {
-            let venue_id = self.venue_id.clone();
+        if let (Some(dt), Some(canonical), false) =
+            (data_type, canonical, instrument_str.is_empty())
+        {
             let instrument_id =
                 InstrumentId::try_new(instrument_str).map_err(|e| VenueError::ReceiveFailed {
                     venue: self.venue_id.as_str().to_owned(),
@@ -133,17 +300,53 @@ impl GenericWsAdapter {
                     reason: e.to_string(),
                 })?;
 
-            if let Some(payload) = self.try_parse_payload(dt, &value)? {
+            if let Some(payload) = self.try_parse_payload(dt, value)? {
                 events.push(MarketDataEnvelope {
-                    venue: venue_id,
+                    venue: self.venue_id.clone(),
                     instrument: instrument_id,
                     canonical_symbol,
                     data_type: dt,
                     received_at: Timestamp::now(),
-                    exchange_timestamp: extract_timestamp(&value),
-                    sequence: Sequence::new(0), // Will be assigned by SequenceTracker
+                    exchange_timestamp: extract_timestamp(value),
+                    sequence: Sequence::new(0),
                     payload,
                 });
+            }
+        }
+
+        // Handle Binance forceOrder wrapper: {"e":"forceOrder","o":{...}}
+        if channel == "forceOrder"
+            && let Some(inner) = value.get("o")
+        {
+            let instrument_str = inner.get("s").and_then(|v| v.as_str()).unwrap_or("");
+            let canonical = self.lookup_canonical(instrument_str);
+
+            if let (Some(canonical), false) = (canonical, instrument_str.is_empty()) {
+                let instrument_id = InstrumentId::try_new(instrument_str).map_err(|e| {
+                    VenueError::ReceiveFailed {
+                        venue: self.venue_id.as_str().to_owned(),
+                        reason: e.to_string(),
+                    }
+                })?;
+                let canonical_symbol = CanonicalSymbol::try_new(&canonical).map_err(|e| {
+                    VenueError::ReceiveFailed {
+                        venue: self.venue_id.as_str().to_owned(),
+                        reason: e.to_string(),
+                    }
+                })?;
+
+                if let Some(payload) = self.try_parse_payload(MarketDataType::Liquidation, inner)? {
+                    events.push(MarketDataEnvelope {
+                        venue: self.venue_id.clone(),
+                        instrument: instrument_id,
+                        canonical_symbol,
+                        data_type: MarketDataType::Liquidation,
+                        received_at: Timestamp::now(),
+                        exchange_timestamp: extract_timestamp(inner),
+                        sequence: Sequence::new(0),
+                        payload,
+                    });
+                }
             }
         }
 
@@ -162,12 +365,23 @@ impl GenericWsAdapter {
                     extract_decimal(value, &["p", "price"]).and_then(|d| Price::try_new(d).ok());
                 let quantity = extract_decimal(value, &["q", "qty", "quantity", "amount"])
                     .and_then(|d| Quantity::try_new(d).ok());
-                let side_str = value
+
+                // Side detection:
+                // 1. String field "S" or "side" (common format)
+                // 2. Boolean field "m" (Binance: true = buyer is maker → aggressor is SELL)
+                let side = if let Some(s) = value
                     .get("S")
                     .or_else(|| value.get("side"))
                     .and_then(|v| v.as_str())
-                    .unwrap_or("buy");
-                let side = Side::from_str_loose(side_str).unwrap_or(Side::Buy);
+                {
+                    Side::from_str_loose(s).unwrap_or(Side::Buy)
+                } else if let Some(m) = value.get("m").and_then(|v| v.as_bool()) {
+                    // Binance: "m" = true means buyer is the maker → aggressor is SELL
+                    if m { Side::Sell } else { Side::Buy }
+                } else {
+                    Side::Buy
+                };
+
                 let trade_id = value
                     .get("t")
                     .or_else(|| value.get("trade_id"))
@@ -194,6 +408,8 @@ impl GenericWsAdapter {
                 }
             }
             MarketDataType::Ticker => {
+                // Binance bookTicker: b=bid price, B=bid qty, a=ask price, A=ask qty
+                // Binance 24h ticker: b=bid, B=bidQty, a=ask, A=askQty, c=last price
                 let bid_price = extract_decimal(value, &["b", "bid", "bidPrice"])
                     .and_then(|d| Price::try_new(d).ok());
                 let bid_qty = extract_decimal(value, &["B", "bidQty"])
@@ -202,8 +418,18 @@ impl GenericWsAdapter {
                     .and_then(|d| Price::try_new(d).ok());
                 let ask_qty = extract_decimal(value, &["A", "askQty"])
                     .and_then(|d| Quantity::try_new(d).ok());
+                // Last price: "c" (Binance 24h ticker), "last", "lastPrice"
+                // For bookTicker (no last price), fall back to midpoint of bid/ask.
                 let last_price = extract_decimal(value, &["c", "last", "lastPrice"])
-                    .and_then(|d| Price::try_new(d).ok());
+                    .and_then(|d| Price::try_new(d).ok())
+                    .or_else(|| {
+                        // Fallback: midpoint of bid and ask.
+                        let bp = bid_price.map(|p| p.value())?;
+                        let ap = ask_price.map(|p| p.value())?;
+                        bp.checked_add(ap)
+                            .and_then(|sum| sum.checked_div(Decimal::TWO))
+                            .and_then(|mid| Price::try_new(mid).ok())
+                    });
 
                 match (bid_price, bid_qty, ask_price, ask_qty, last_price) {
                     (Some(bp), Some(bq), Some(ap), Some(aq), Some(lp)) => {
@@ -224,6 +450,8 @@ impl GenericWsAdapter {
             MarketDataType::L2Orderbook => {
                 let bids = parse_price_levels(value, &["bids", "b"]);
                 let asks = parse_price_levels(value, &["asks", "a"]);
+                // Binance depth: no "type" field; first message after subscribe is a full snapshot
+                // if using depthSnapshot endpoint. For stream updates, detect via "lastUpdateId".
                 let is_snapshot = value
                     .get("type")
                     .and_then(|v| v.as_str())
@@ -242,6 +470,7 @@ impl GenericWsAdapter {
                 }
             }
             MarketDataType::FundingRate => {
+                // Binance futures markPrice stream: "r" = funding rate, "T" = next funding time
                 let rate = extract_decimal(value, &["r", "rate", "fundingRate"]);
                 let predicted = extract_decimal(value, &["predictedRate", "nextRate"]);
                 let next_at = value
@@ -263,6 +492,7 @@ impl GenericWsAdapter {
                 }
             }
             MarketDataType::Liquidation => {
+                // Binance forceOrder: "S" = side, "p" = price, "q" = quantity
                 let side_str = value
                     .get("S")
                     .or_else(|| value.get("side"))
@@ -341,24 +571,20 @@ impl VenueAdapter for GenericWsAdapter {
                 });
             }
 
-            // Build instrument map and collect messages to send.
-            let mut messages = Vec::new();
+            // Build instrument map (all case variants for matching responses).
             for sub in &subs {
                 self.instrument_map
                     .insert(sub.instrument.clone(), sub.canonical_symbol.clone());
+                self.instrument_map
+                    .insert(sub.instrument.to_uppercase(), sub.canonical_symbol.clone());
+                self.instrument_map
+                    .insert(sub.instrument.to_lowercase(), sub.canonical_symbol.clone());
+            }
 
-                for dt in &sub.data_types {
-                    let channel_name = self
-                        .ws_config
-                        .channel_map
-                        .get(dt.as_subject_str())
-                        .cloned()
-                        .unwrap_or_else(|| dt.as_subject_str().to_owned());
-
-                    let msg = self.build_subscribe_message(&channel_name, &sub.instrument);
-                    debug!(venue = %self.venue_id, message = %msg, "sending subscribe");
-                    messages.push(msg);
-                }
+            // Build subscribe messages.
+            let messages = self.build_subscribe_messages(&subs);
+            for msg in &messages {
+                debug!(venue = %self.venue_id, message = %msg, "sending subscribe");
             }
 
             // Now send all messages.
