@@ -371,12 +371,12 @@ impl VenueAdapter for GenericWsAdapter {
                 })?;
 
             for msg in messages {
-                ws.send(Message::Text(msg))
-                    .await
-                    .map_err(|e| VenueError::SubscribeFailed {
+                ws.send(Message::Text(msg.into())).await.map_err(|e| {
+                    VenueError::SubscribeFailed {
                         venue: self.venue_id.as_str().to_owned(),
                         reason: e.to_string(),
-                    })?;
+                    }
+                })?;
             }
 
             Ok(())
