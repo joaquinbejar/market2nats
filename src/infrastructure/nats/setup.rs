@@ -25,6 +25,11 @@ pub async fn connect_nats(config: &NatsConfig) -> Result<async_nats::Client, Nat
                 options = options.token(token.clone());
             }
         }
+        "userpass" => {
+            if let (Some(user), Some(pass)) = (&config.username, &config.password) {
+                options = options.user_and_password(user.clone(), pass.clone());
+            }
+        }
         "credentials" => {
             if let Some(ref path) = config.credentials_path {
                 options = options

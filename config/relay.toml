@@ -1,5 +1,5 @@
 [service]
-name = "market-data-relay"
+name = "market2nats"
 log_level = "info"
 log_format = "json"
 shutdown_timeout_ms = 5000
@@ -10,7 +10,9 @@ connect_timeout_ms = 5000
 reconnect_buffer_size = 8388608
 max_reconnects = -1
 ping_interval_secs = 20
-auth = "none"
+auth = "userpass"
+username = "${NATS_USER}"
+password = "${NATS_PASSWORD}"
  
 [nats.tls]
 enabled = false

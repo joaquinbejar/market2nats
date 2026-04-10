@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn test_load_config_parses_relay_toml() {
         let config = load_config("config/relay.toml").unwrap();
-        assert_eq!(config.service.name, "market-data-relay");
+        assert_eq!(config.service.name, "market2nats");
         assert!(!config.venues.is_empty());
         assert!(!config.nats.streams.is_empty());
     }

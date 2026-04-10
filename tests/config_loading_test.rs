@@ -17,7 +17,7 @@ fn test_load_default_config() {
     );
 
     let cfg = result.unwrap();
-    assert_eq!(cfg.service.name, "market-data-relay");
+    assert_eq!(cfg.service.name, "market2nats");
     assert!(!cfg.venues.is_empty());
     assert!(!cfg.nats.streams.is_empty());
     assert!(!cfg.nats.consumers.is_empty());

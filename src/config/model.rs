@@ -47,11 +47,15 @@ pub struct NatsConfig {
     /// Ping interval in seconds.
     #[serde(default = "default_ping_interval")]
     pub ping_interval_secs: u64,
-    /// Authentication method: "none", "token", "nkey", "credentials".
+    /// Authentication method: "none", "token", "userpass", "nkey", "credentials".
     #[serde(default = "default_auth")]
     pub auth: String,
     /// Token for token-based auth (supports `${ENV_VAR}` substitution).
     pub token: Option<String>,
+    /// Username for user/password auth (supports `${ENV_VAR}` substitution).
+    pub username: Option<String>,
+    /// Password for user/password auth (supports `${ENV_VAR}` substitution).
+    pub password: Option<String>,
     /// Path to credentials file.
     pub credentials_path: Option<String>,
     /// NKey seed (supports `${ENV_VAR}` substitution).

@@ -240,6 +240,8 @@ mod tests {
                 ping_interval_secs: 20,
                 auth: "none".to_owned(),
                 token: None,
+                username: None,
+                password: None,
                 credentials_path: None,
                 nkey_seed: None,
                 tls: NatsTlsConfig::default(),
