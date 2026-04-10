@@ -5,7 +5,10 @@ use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
 use market2nats::application::ports::NatsPublisher;
-use market2nats::application::{HealthMonitor, SequenceTracker, StreamRouter, SubscriptionManager};
+use market2nats::application::{
+    HealthMonitor, PipelineStats, SequenceTracker, StreamRouter, SubscriptionManager,
+    spawn_stats_logger,
+};
 use market2nats::config;
 use market2nats::infrastructure::http::{HttpState, start_http_server};
 use market2nats::infrastructure::nats::{JetStreamPublisher, connect_nats, setup_jetstream};
@@ -54,6 +57,7 @@ async fn main() -> Result<(), ServiceError> {
     let health_monitor = Arc::new(HealthMonitor::new());
     let sequence_tracker = Arc::new(SequenceTracker::new());
     let stream_router = Arc::new(StreamRouter::new());
+    let pipeline_stats = Arc::new(PipelineStats::new());
 
     // Connect to NATS.
     let nats_client = connect_nats(&app_config.nats).await?;
@@ -104,6 +108,7 @@ async fn main() -> Result<(), ServiceError> {
     // Spawn the publisher task.
     let pub_publisher = Arc::clone(&publisher);
     let pub_router = Arc::clone(&stream_router);
+    let pub_stats = Arc::clone(&pipeline_stats);
     let pub_shutdown = shutdown_rx.clone();
     let publisher_handle = tokio::spawn(async move {
         // Default to protobuf serialization.
@@ -115,21 +120,29 @@ async fn main() -> Result<(), ServiceError> {
                 break;
             }
 
+            let venue = envelope.venue.as_str().to_owned();
+            let data_type = envelope.data_type.as_subject_str().to_owned();
+            pub_stats.record_received(&venue, &data_type);
+
             let subject = pub_router.resolve_subject(&envelope);
 
             match serialization::serialize_envelope(&envelope, format) {
                 Ok(payload) => {
                     if let Err(e) = pub_publisher.publish(&subject, &payload, ct).await {
                         error!(subject = %subject, error = %e, "publish failed");
+                        pub_stats.record_publish_error(&venue, &data_type);
+                    } else {
+                        pub_stats.record_published(&venue, &data_type);
                     }
                 }
                 Err(e) => {
                     error!(
-                        venue = %envelope.venue,
+                        venue = %venue,
                         instrument = %envelope.instrument,
                         error = %e,
                         "serialization failed"
                     );
+                    pub_stats.record_serialize_error(&venue, &data_type);
                 }
             }
         }
@@ -147,6 +160,13 @@ async fn main() -> Result<(), ServiceError> {
             error!(error = %e, "http server failed");
         }
     });
+
+    // Spawn periodic stats logger (every 10 seconds).
+    let stats_handle = spawn_stats_logger(
+        Arc::clone(&pipeline_stats),
+        Duration::from_secs(10),
+        shutdown_rx.clone(),
+    );
 
     // Wait for shutdown signal (SIGTERM or SIGINT).
     let shutdown_timeout_ms = app_config.service.shutdown_timeout_ms;
@@ -169,6 +189,7 @@ async fn main() -> Result<(), ServiceError> {
             let _ = handle.await;
         }
         let _ = publisher_handle.await;
+        let _ = stats_handle.await;
     })
     .await
     .is_err()
