@@ -4,15 +4,15 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
-use market_data_relay::application::ports::NatsPublisher;
-use market_data_relay::application::{
+use market2nats::application::ports::NatsPublisher;
+use market2nats::application::{
     HealthMonitor, SequenceTracker, StreamRouter, SubscriptionManager,
 };
-use market_data_relay::config;
-use market_data_relay::infrastructure::http::{start_http_server, HttpState};
-use market_data_relay::infrastructure::nats::{connect_nats, setup_jetstream, JetStreamPublisher};
-use market_data_relay::infrastructure::ws::GenericWsAdapter;
-use market_data_relay::serialization::{self, SerializationFormat};
+use market2nats::config;
+use market2nats::infrastructure::http::{start_http_server, HttpState};
+use market2nats::infrastructure::nats::{connect_nats, setup_jetstream, JetStreamPublisher};
+use market2nats::infrastructure::ws::GenericWsAdapter;
+use market2nats::serialization::{self, SerializationFormat};
 
 /// Service error aggregating all layer errors.
 #[derive(Debug, thiserror::Error)]
@@ -20,7 +20,7 @@ enum ServiceError {
     #[error("config: {0}")]
     Config(#[from] config::ConfigError),
     #[error("nats: {0}")]
-    Nats(#[from] market_data_relay::application::NatsError),
+    Nats(#[from] market2nats::application::NatsError),
     #[error("serialization: {0}")]
     Serialization(#[from] serialization::SerializeError),
     #[error("io: {0}")]
@@ -211,8 +211,8 @@ fn init_tracing(log_level: &str, log_format: &str) {
 
 /// Creates a venue adapter from config.
 fn create_adapter(
-    venue_config: &market_data_relay::config::model::VenueConfig,
-) -> Result<Box<dyn market_data_relay::application::VenueAdapter>, String> {
+    venue_config: &market2nats::config::model::VenueConfig,
+) -> Result<Box<dyn market2nats::application::VenueAdapter>, String> {
     // All adapters use the generic WebSocket adapter for now.
     // Venue-specific adapters (binance, etc.) can be added as match arms.
     match venue_config.adapter.as_str() {
@@ -248,7 +248,7 @@ fn create_adapter(
                 Ok(Box::new(adapter))
             } else {
                 // Create a minimal generic adapter for venues without explicit generic_ws config.
-                let ws_config = market_data_relay::config::model::GenericWsConfig {
+                let ws_config = market2nats::config::model::GenericWsConfig {
                     subscribe_template: String::new(),
                     channel_map: std::collections::HashMap::new(),
                     message_format: "json".to_owned(),

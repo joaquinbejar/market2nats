@@ -101,6 +101,19 @@ cargo +stable fmt --all
 | `dashmap` | Concurrent hash maps |
 | `thiserror` | Typed error enums |
 
+
+## Contact
+
+If you have any questions, issues, or would like to provide feedback, please feel free to contact the project maintainer:
+
+- **Author**: Joaquín Béjar García
+- **Email**: jb@taunais.com
+- **Telegram**: [@joaquin_bejar](https://t.me/joaquin_bejar)
+- **Repository**: <https://github.com/joaquinbejar/market2nats>
+- **Documentation**: <https://docs.rs/market2nats>
+
+---
+
 ## License
 
-Proprietary.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

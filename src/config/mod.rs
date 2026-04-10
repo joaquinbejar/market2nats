@@ -83,10 +83,10 @@ mod tests {
 
     #[test]
     fn test_substitute_env_vars_replaces() {
-        std::env::set_var("TEST_MDR_VAR", "hello");
+        unsafe { std::env::set_var("TEST_MDR_VAR", "hello") };
         let result = substitute_env_vars("token = \"${TEST_MDR_VAR}\"");
         assert_eq!(result, "token = \"hello\"");
-        std::env::remove_var("TEST_MDR_VAR");
+        unsafe { std::env::remove_var("TEST_MDR_VAR") };
     }
 
     #[test]

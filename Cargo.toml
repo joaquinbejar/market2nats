@@ -1,8 +1,7 @@
 [package]
-name = "market-data-relay"
+name = "market2nats"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.75"
+edition = "2024"
 description = "WebSocket market data → NATS JetStream relay"
  
 [dependencies]
@@ -53,6 +52,9 @@ prost-build = "0.13"
 [dev-dependencies]
 tokio-test = "0.4"
 rust_decimal_macros = "1"
+reqwest = { version = "0.12", features = ["json"] }
+portpicker = "0.1"
+tempfile = "3"
  
 [profile.release]
 lto = true
