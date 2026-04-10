@@ -20,15 +20,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           toolchain: stable
           override: true
 
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Install dependencies
-        run: |
-          sudo apt-get update && sudo apt-get install -y make pkg-config protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y make pkg-config
 
       - name: Install Tarpaulin
         run: cargo install cargo-tarpaulin
@@ -42,8 +47,9 @@ jobs:
           --out Xml
 
       - name: Upload coverage reports to Codecov.io
+        if: env.CODECOV_TOKEN != ''
         uses: codecov/codecov-action@v4
         with:
-          fail_ci_if_error: true
+          fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

@@ -24,15 +24,20 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           toolchain: stable
           override: true
 
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Install dependencies
-        run: |
-          sudo apt-get update && sudo apt-get install -y make pkg-config build-essential protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y make pkg-config build-essential
 
       - name: Build
         run: make build
