@@ -3,19 +3,47 @@
 //! Requires a running NATS server with JetStream enabled.
 //! Start one with: `docker compose up -d`
 
-mod helpers;
+use std::time::Duration;
 
 use async_nats::jetstream;
 use futures_util::StreamExt;
 
 use market2nats::application::ports::NatsPublisher;
+
+async fn connect_nats() -> async_nats::Client {
+    let url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_owned());
+    async_nats::ConnectOptions::new()
+        .connection_timeout(Duration::from_secs(5))
+        .connect(&url)
+        .await
+        .unwrap_or_else(|e| {
+            panic!("cannot connect to NATS at {url}: {e}. Is NATS running? Try: docker compose -f Docker/docker-compose.yml up -d nats")
+        })
+}
+
+fn unique_stream_name(prefix: &str) -> String {
+    let id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    format!("{prefix}_{id}")
+}
+
+fn unique_subject_prefix() -> String {
+    let id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    format!("test_{id}")
+}
 use market2nats::config::model::{ConsumerConfig, StreamConfig};
 use market2nats::infrastructure::nats::JetStreamPublisher;
 
 /// Test that we can connect to NATS.
 #[tokio::test]
+#[ignore]
 async fn test_nats_connection() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     assert_eq!(
         client.connection_state(),
         async_nats::connection::State::Connected
@@ -24,8 +52,9 @@ async fn test_nats_connection() {
 
 /// Test that JetStream context is available.
 #[tokio::test]
+#[ignore]
 async fn test_jetstream_available() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let js = jetstream::new(client);
 
     // Account info should be available if JetStream is enabled.
@@ -35,10 +64,11 @@ async fn test_jetstream_available() {
 
 /// Test creating a JetStream stream via our publisher.
 #[tokio::test]
+#[ignore]
 async fn test_create_stream() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client);
-    let stream_name = helpers::unique_stream_name("TEST_STREAM");
+    let stream_name = unique_stream_name("TEST_STREAM");
 
     let config = StreamConfig {
         name: stream_name.clone(),
@@ -72,10 +102,11 @@ async fn test_create_stream() {
 
 /// Test creating a stream is idempotent (calling ensure_stream twice doesn't error).
 #[tokio::test]
+#[ignore]
 async fn test_create_stream_idempotent() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client);
-    let stream_name = helpers::unique_stream_name("TEST_IDEMPOTENT");
+    let stream_name = unique_stream_name("TEST_IDEMPOTENT");
 
     let config = StreamConfig {
         name: stream_name.clone(),
@@ -107,10 +138,11 @@ async fn test_create_stream_idempotent() {
 
 /// Test creating a consumer on a stream.
 #[tokio::test]
+#[ignore]
 async fn test_create_consumer() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client);
-    let stream_name = helpers::unique_stream_name("TEST_CONSUMER_STREAM");
+    let stream_name = unique_stream_name("TEST_CONSUMER_STREAM");
 
     // Create stream first.
     let stream_config = StreamConfig {
@@ -153,7 +185,7 @@ async fn test_create_consumer() {
 
     // Verify consumer exists.
     let js = publisher.jetstream_context();
-    let mut stream = js.get_stream(&stream_name).await.unwrap();
+    let stream = js.get_stream(&stream_name).await.unwrap();
     let consumer = stream
         .get_consumer::<jetstream::consumer::pull::Config>(&consumer_name)
         .await;
@@ -169,8 +201,9 @@ async fn test_create_consumer() {
 
 /// Test consumer creation fails when stream doesn't exist.
 #[tokio::test]
+#[ignore]
 async fn test_create_consumer_missing_stream() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client);
 
     let consumer_config = ConsumerConfig {
@@ -193,8 +226,9 @@ async fn test_create_consumer_missing_stream() {
 
 /// Test health check returns Ok when NATS is up.
 #[tokio::test]
+#[ignore]
 async fn test_health_check_ok() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client);
 
     let result = publisher.health_check().await;
@@ -203,10 +237,11 @@ async fn test_health_check_ok() {
 
 /// Test creating multiple streams in sequence (simulates startup).
 #[tokio::test]
+#[ignore]
 async fn test_setup_multiple_streams() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client);
-    let prefix = helpers::unique_subject_prefix();
+    let prefix = unique_subject_prefix();
 
     let stream_configs = vec![
         StreamConfig {
@@ -273,8 +308,9 @@ async fn test_setup_multiple_streams() {
 
 /// Test stream with different retention policies.
 #[tokio::test]
+#[ignore]
 async fn test_stream_retention_policies() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client);
     let js = publisher.jetstream_context();
 
@@ -284,7 +320,7 @@ async fn test_stream_retention_policies() {
         ("workqueue", "memory"),
         ("limits", "file"),
     ] {
-        let stream_name = helpers::unique_stream_name(&format!("TEST_{retention}_{storage}"));
+        let stream_name = unique_stream_name(&format!("TEST_{retention}_{storage}"));
         let config = StreamConfig {
             name: stream_name.clone(),
             subjects: vec![format!("{stream_name}.>")],
@@ -312,11 +348,12 @@ async fn test_stream_retention_policies() {
 
 /// Test consumer with different ack policies.
 #[tokio::test]
+#[ignore]
 async fn test_consumer_ack_policies() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client);
     let js = publisher.jetstream_context();
-    let stream_name = helpers::unique_stream_name("TEST_ACK_POLICIES");
+    let stream_name = unique_stream_name("TEST_ACK_POLICIES");
 
     let stream_config = StreamConfig {
         name: stream_name.clone(),

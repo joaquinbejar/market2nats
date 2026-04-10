@@ -5,8 +5,6 @@
 //!
 //! Requires a running NATS server with JetStream enabled.
 
-mod helpers;
-
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,9 +17,31 @@ use market2nats::application::{HealthMonitor, SequenceTracker, StreamRouter, Sub
 use market2nats::config::model::{
     CircuitBreakerConfig, ConnectionConfig, StreamConfig, VenueConfig,
 };
-use market2nats::domain::{MarketDataEnvelope, VenueId};
+use market2nats::domain::{
+    CanonicalSymbol, InstrumentId, MarketDataEnvelope, MarketDataPayload, MarketDataType, Price,
+    Quantity, Sequence, Side, Timestamp, Trade, VenueId,
+};
 use market2nats::infrastructure::nats::JetStreamPublisher;
 use market2nats::serialization::{self, SerializationFormat};
+
+async fn connect_nats() -> async_nats::Client {
+    let url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_owned());
+    async_nats::ConnectOptions::new()
+        .connection_timeout(Duration::from_secs(5))
+        .connect(&url)
+        .await
+        .unwrap_or_else(|e| {
+            panic!("cannot connect to NATS at {url}: {e}. Is NATS running? Try: docker compose -f Docker/docker-compose.yml up -d nats")
+        })
+}
+
+fn unique_subject_prefix() -> String {
+    let id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    format!("test_{id}")
+}
 
 // ── Mock VenueAdapter ─────────────────────────────────────────────────────
 
@@ -109,7 +129,23 @@ impl VenueAdapter for MockVenueAdapter {
 // ── Test helpers ──────────────────────────────────────────────────────────
 
 fn make_trade(venue: &str, instrument: &str, canonical: &str, seq: u64) -> MarketDataEnvelope {
-    helpers::sample_trade_envelope(venue, instrument, canonical, seq)
+    use rust_decimal_macros::dec;
+
+    MarketDataEnvelope {
+        venue: VenueId::try_new(venue).unwrap(),
+        instrument: InstrumentId::try_new(instrument).unwrap(),
+        canonical_symbol: CanonicalSymbol::try_new(canonical).unwrap(),
+        data_type: MarketDataType::Trade,
+        received_at: Timestamp::new(1_700_000_000_000),
+        exchange_timestamp: Some(Timestamp::new(1_699_999_999_999)),
+        sequence: Sequence::new(seq),
+        payload: MarketDataPayload::Trade(Trade {
+            price: Price::try_new(dec!(50000.50)).unwrap(),
+            quantity: Quantity::try_new(dec!(1.25)).unwrap(),
+            side: Side::Buy,
+            trade_id: Some(format!("trade_{seq}")),
+        }),
+    }
 }
 
 fn mock_venue_config(venue_id: &str) -> VenueConfig {
@@ -140,13 +176,14 @@ fn mock_venue_config(venue_id: &str) -> VenueConfig {
 /// Full pipeline: mock adapter emits events → subscription manager picks them up →
 /// events go through channel → we publish to NATS → verify in stream.
 #[tokio::test]
+#[ignore]
 async fn test_end_to_end_mock_to_nats() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client.clone());
     let js = jetstream::new(client);
 
     // Setup a test stream.
-    let prefix = helpers::unique_subject_prefix();
+    let prefix = unique_subject_prefix();
     let stream_name = format!("{prefix}_E2E_TRADES");
 
     publisher
@@ -242,12 +279,13 @@ async fn test_end_to_end_mock_to_nats() {
 
 /// Test that multiple venue adapters publish to different subjects correctly.
 #[tokio::test]
+#[ignore]
 async fn test_end_to_end_multiple_venues() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client.clone());
     let js = jetstream::new(client);
 
-    let prefix = helpers::unique_subject_prefix();
+    let prefix = unique_subject_prefix();
     let stream_name = format!("{prefix}_MULTI_VENUE");
 
     publisher
@@ -341,12 +379,13 @@ async fn test_end_to_end_multiple_venues() {
 
 /// Test that sequence numbers are correctly assigned per (venue, instrument, data_type).
 #[tokio::test]
+#[ignore]
 async fn test_end_to_end_sequence_assignment() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client.clone());
     let js = jetstream::new(client);
 
-    let prefix = helpers::unique_subject_prefix();
+    let prefix = unique_subject_prefix();
     let stream_name = format!("{prefix}_SEQ_ASSIGN");
 
     publisher
@@ -368,7 +407,7 @@ async fn test_end_to_end_sequence_assignment() {
 
     // Emit 10 events — all will get sequence reassigned by SequenceTracker.
     let events: Vec<MarketDataEnvelope> = (1..=10)
-        .map(|i| make_trade("seq_venue", "BTCUSDT", "BTC/USDT", 0)) // sequence=0, will be overwritten
+        .map(|_i| make_trade("seq_venue", "BTCUSDT", "BTC/USDT", 0)) // sequence=0, will be overwritten
         .collect();
 
     let adapter = MockVenueAdapter::new("seq_venue", events);

@@ -18,7 +18,7 @@ RUN mkdir -p src && \
 
 # Copy real source and build.
 COPY src/ src/
-RUN cargo build --release --bin market-data-relay
+RUN cargo build --release --bin market2nats
 
 # ── Runtime ──────────────────────────────────────────────────────────────
 
@@ -26,10 +26,10 @@ FROM alpine:3.23
 
 RUN apk add --no-cache ca-certificates
 
-COPY --from=builder /app/target/release/market-data-relay /usr/local/bin/market-data-relay
-COPY config/relay.toml /etc/market-data-relay/relay.toml
+COPY --from=builder /app/target/release/market2nats /usr/local/bin/market2nats
+COPY config/relay.toml /etc/market2nats/relay.toml
 
 EXPOSE 8080
 
-ENTRYPOINT ["market-data-relay"]
-CMD ["/etc/market-data-relay/relay.toml"]
+ENTRYPOINT ["market2nats"]
+CMD ["/etc/market2nats/relay.toml"]

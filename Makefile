@@ -16,10 +16,20 @@ build:
 release:
 	cargo build --release
 
-# Run tests
+# Run unit tests (no external services needed)
 .PHONY: test
 test:
 	LOGLEVEL=WARN cargo test
+
+# Run integration tests (requires NATS: docker compose -f Docker/docker-compose.yml up -d nats)
+.PHONY: integration-test
+integration-test:
+	LOGLEVEL=WARN cargo test -- --ignored
+
+# Run all tests (unit + integration)
+.PHONY: test-all
+test-all:
+	LOGLEVEL=WARN cargo test -- --include-ignored
 
 # Format the code
 .PHONY: fmt

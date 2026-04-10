@@ -3,20 +3,186 @@
 //! Requires a running NATS server with JetStream enabled.
 //! Start one with: `docker compose -f Docker/docker-compose.yml up -d nats`
 
-mod helpers;
+use std::time::Duration;
 
 use async_nats::jetstream;
 use futures_util::StreamExt;
+use rust_decimal_macros::dec;
 
 use market2nats::application::ports::NatsPublisher;
 use market2nats::config::model::StreamConfig;
-use market2nats::domain::MarketDataEnvelope;
+use market2nats::domain::{
+    CanonicalSymbol, FundingRate, InstrumentId, L2Update, Liquidation, MarketDataEnvelope,
+    MarketDataPayload, MarketDataType, Price, Quantity, Sequence, Side, Ticker, Timestamp, Trade,
+    VenueId,
+};
 use market2nats::infrastructure::nats::JetStreamPublisher;
 use market2nats::serialization::{self, SerializationFormat};
 
+async fn connect_nats() -> async_nats::Client {
+    let url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_owned());
+    async_nats::ConnectOptions::new()
+        .connection_timeout(Duration::from_secs(5))
+        .connect(&url)
+        .await
+        .unwrap_or_else(|e| {
+            panic!("cannot connect to NATS at {url}: {e}. Is NATS running? Try: docker compose -f Docker/docker-compose.yml up -d nats")
+        })
+}
+
+fn unique_stream_name(prefix: &str) -> String {
+    let id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    format!("{prefix}_{id}")
+}
+
+fn unique_subject_prefix() -> String {
+    let id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    format!("test_{id}")
+}
+
+// ── Sample builder helpers ───────────────────────────────────────────────
+
+fn sample_trade_envelope(
+    venue: &str,
+    instrument: &str,
+    canonical: &str,
+    seq: u64,
+) -> MarketDataEnvelope {
+    MarketDataEnvelope {
+        venue: VenueId::try_new(venue).unwrap(),
+        instrument: InstrumentId::try_new(instrument).unwrap(),
+        canonical_symbol: CanonicalSymbol::try_new(canonical).unwrap(),
+        data_type: MarketDataType::Trade,
+        received_at: Timestamp::new(1_700_000_000_000),
+        exchange_timestamp: Some(Timestamp::new(1_699_999_999_999)),
+        sequence: Sequence::new(seq),
+        payload: MarketDataPayload::Trade(Trade {
+            price: Price::try_new(dec!(50000.50)).unwrap(),
+            quantity: Quantity::try_new(dec!(1.25)).unwrap(),
+            side: Side::Buy,
+            trade_id: Some(format!("trade_{seq}")),
+        }),
+    }
+}
+
+fn sample_ticker_envelope(
+    venue: &str,
+    instrument: &str,
+    canonical: &str,
+    seq: u64,
+) -> MarketDataEnvelope {
+    MarketDataEnvelope {
+        venue: VenueId::try_new(venue).unwrap(),
+        instrument: InstrumentId::try_new(instrument).unwrap(),
+        canonical_symbol: CanonicalSymbol::try_new(canonical).unwrap(),
+        data_type: MarketDataType::Ticker,
+        received_at: Timestamp::new(1_700_000_000_000),
+        exchange_timestamp: Some(Timestamp::new(1_699_999_999_999)),
+        sequence: Sequence::new(seq),
+        payload: MarketDataPayload::Ticker(Ticker {
+            bid_price: Price::try_new(dec!(49999.00)).unwrap(),
+            bid_qty: Quantity::try_new(dec!(2.0)).unwrap(),
+            ask_price: Price::try_new(dec!(50001.00)).unwrap(),
+            ask_qty: Quantity::try_new(dec!(1.5)).unwrap(),
+            last_price: Price::try_new(dec!(50000.00)).unwrap(),
+        }),
+    }
+}
+
+fn sample_l2_envelope(
+    venue: &str,
+    instrument: &str,
+    canonical: &str,
+    seq: u64,
+    is_snapshot: bool,
+) -> MarketDataEnvelope {
+    MarketDataEnvelope {
+        venue: VenueId::try_new(venue).unwrap(),
+        instrument: InstrumentId::try_new(instrument).unwrap(),
+        canonical_symbol: CanonicalSymbol::try_new(canonical).unwrap(),
+        data_type: MarketDataType::L2Orderbook,
+        received_at: Timestamp::new(1_700_000_000_000),
+        exchange_timestamp: Some(Timestamp::new(1_699_999_999_999)),
+        sequence: Sequence::new(seq),
+        payload: MarketDataPayload::L2Update(L2Update {
+            bids: vec![
+                (
+                    Price::try_new(dec!(49999.00)).unwrap(),
+                    Quantity::try_new(dec!(10.0)).unwrap(),
+                ),
+                (
+                    Price::try_new(dec!(49998.00)).unwrap(),
+                    Quantity::try_new(dec!(20.0)).unwrap(),
+                ),
+            ],
+            asks: vec![
+                (
+                    Price::try_new(dec!(50001.00)).unwrap(),
+                    Quantity::try_new(dec!(5.0)).unwrap(),
+                ),
+                (
+                    Price::try_new(dec!(50002.00)).unwrap(),
+                    Quantity::try_new(dec!(15.0)).unwrap(),
+                ),
+            ],
+            is_snapshot,
+        }),
+    }
+}
+
+fn sample_funding_rate_envelope(
+    venue: &str,
+    instrument: &str,
+    canonical: &str,
+    seq: u64,
+) -> MarketDataEnvelope {
+    MarketDataEnvelope {
+        venue: VenueId::try_new(venue).unwrap(),
+        instrument: InstrumentId::try_new(instrument).unwrap(),
+        canonical_symbol: CanonicalSymbol::try_new(canonical).unwrap(),
+        data_type: MarketDataType::FundingRate,
+        received_at: Timestamp::new(1_700_000_000_000),
+        exchange_timestamp: Some(Timestamp::new(1_699_999_999_999)),
+        sequence: Sequence::new(seq),
+        payload: MarketDataPayload::FundingRate(FundingRate {
+            rate: dec!(0.0001),
+            predicted_rate: Some(dec!(0.00015)),
+            next_funding_at: Timestamp::new(1_700_003_600_000),
+        }),
+    }
+}
+
+fn sample_liquidation_envelope(
+    venue: &str,
+    instrument: &str,
+    canonical: &str,
+    seq: u64,
+) -> MarketDataEnvelope {
+    MarketDataEnvelope {
+        venue: VenueId::try_new(venue).unwrap(),
+        instrument: InstrumentId::try_new(instrument).unwrap(),
+        canonical_symbol: CanonicalSymbol::try_new(canonical).unwrap(),
+        data_type: MarketDataType::Liquidation,
+        received_at: Timestamp::new(1_700_000_000_000),
+        exchange_timestamp: Some(Timestamp::new(1_699_999_999_999)),
+        sequence: Sequence::new(seq),
+        payload: MarketDataPayload::Liquidation(Liquidation {
+            side: Side::Sell,
+            price: Price::try_new(dec!(48000.00)).unwrap(),
+            quantity: Quantity::try_new(dec!(0.5)).unwrap(),
+        }),
+    }
+}
+
 /// Helper to create a test stream.
 async fn setup_test_stream(publisher: &JetStreamPublisher, prefix: &str) -> String {
-    let stream_name = helpers::unique_stream_name(prefix);
+    let stream_name = unique_stream_name(prefix);
     let config = StreamConfig {
         name: stream_name.clone(),
         subjects: vec![format!("{stream_name}.>")],
@@ -36,12 +202,13 @@ async fn setup_test_stream(publisher: &JetStreamPublisher, prefix: &str) -> Stri
 
 /// Test publishing a single trade event as protobuf and reading it back.
 #[tokio::test]
+#[ignore]
 async fn test_publish_trade_protobuf() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client.clone());
     let stream_name = setup_test_stream(&publisher, "PUB_TRADE_PB").await;
 
-    let envelope = helpers::sample_trade_envelope("binance", "BTCUSDT", "BTC/USDT", 1);
+    let envelope = sample_trade_envelope("binance", "BTCUSDT", "BTC/USDT", 1);
     let subject = format!("{stream_name}.binance.btc-usdt.trade");
     let payload =
         serialization::serialize_envelope(&envelope, SerializationFormat::Protobuf).unwrap();
@@ -51,7 +218,7 @@ async fn test_publish_trade_protobuf() {
 
     // Consume the message directly from the stream.
     let js = jetstream::new(client);
-    let mut stream = js.get_stream(&stream_name).await.unwrap();
+    let stream = js.get_stream(&stream_name).await.unwrap();
     let msg = stream.direct_get(1).await.unwrap();
 
     assert!(!msg.payload.is_empty());
@@ -64,12 +231,13 @@ async fn test_publish_trade_protobuf() {
 
 /// Test publishing a trade event as JSON and verifying the content.
 #[tokio::test]
+#[ignore]
 async fn test_publish_trade_json_roundtrip() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client.clone());
     let stream_name = setup_test_stream(&publisher, "PUB_TRADE_JSON").await;
 
-    let envelope = helpers::sample_trade_envelope("kraken", "XBTUSD", "BTC/USD", 42);
+    let envelope = sample_trade_envelope("kraken", "XBTUSD", "BTC/USD", 42);
     let subject = format!("{stream_name}.kraken.btc-usd.trade");
     let payload = serialization::serialize_envelope(&envelope, SerializationFormat::Json).unwrap();
     let ct = serialization::content_type(SerializationFormat::Json);
@@ -78,7 +246,7 @@ async fn test_publish_trade_json_roundtrip() {
 
     // Read back and deserialize.
     let js = jetstream::new(client);
-    let mut stream = js.get_stream(&stream_name).await.unwrap();
+    let stream = js.get_stream(&stream_name).await.unwrap();
     let msg = stream.direct_get(1).await.unwrap();
 
     let deserialized: MarketDataEnvelope = serde_json::from_slice(&msg.payload).unwrap();
@@ -91,17 +259,18 @@ async fn test_publish_trade_json_roundtrip() {
 
 /// Test publishing all five market data types.
 #[tokio::test]
+#[ignore]
 async fn test_publish_all_data_types() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client.clone());
     let stream_name = setup_test_stream(&publisher, "PUB_ALL_TYPES").await;
 
     let envelopes: Vec<MarketDataEnvelope> = vec![
-        helpers::sample_trade_envelope("binance", "BTCUSDT", "BTC/USDT", 1),
-        helpers::sample_ticker_envelope("binance", "BTCUSDT", "BTC/USDT", 2),
-        helpers::sample_l2_envelope("binance", "BTCUSDT", "BTC/USDT", 3, true),
-        helpers::sample_funding_rate_envelope("binance", "BTCUSDT", "BTC/USDT", 4),
-        helpers::sample_liquidation_envelope("binance", "BTCUSDT", "BTC/USDT", 5),
+        sample_trade_envelope("binance", "BTCUSDT", "BTC/USDT", 1),
+        sample_ticker_envelope("binance", "BTCUSDT", "BTC/USDT", 2),
+        sample_l2_envelope("binance", "BTCUSDT", "BTC/USDT", 3, true),
+        sample_funding_rate_envelope("binance", "BTCUSDT", "BTC/USDT", 4),
+        sample_liquidation_envelope("binance", "BTCUSDT", "BTC/USDT", 5),
     ];
 
     let data_types = [
@@ -131,14 +300,15 @@ async fn test_publish_all_data_types() {
 
 /// Test publishing multiple messages and consuming them via a pull consumer.
 #[tokio::test]
+#[ignore]
 async fn test_publish_and_pull_consume() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client.clone());
     let stream_name = setup_test_stream(&publisher, "PUB_PULL").await;
 
     let count = 10u64;
     for i in 1..=count {
-        let envelope = helpers::sample_trade_envelope("binance", "BTCUSDT", "BTC/USDT", i);
+        let envelope = sample_trade_envelope("binance", "BTCUSDT", "BTC/USDT", i);
         let subject = format!("{stream_name}.binance.btc-usdt.trade");
         let payload =
             serialization::serialize_envelope(&envelope, SerializationFormat::Json).unwrap();
@@ -148,7 +318,7 @@ async fn test_publish_and_pull_consume() {
 
     // Create a pull consumer and fetch messages.
     let js = jetstream::new(client);
-    let mut stream = js.get_stream(&stream_name).await.unwrap();
+    let stream = js.get_stream(&stream_name).await.unwrap();
     let consumer = stream
         .create_consumer(jetstream::consumer::pull::Config {
             durable_name: Some("test_puller".to_owned()),
@@ -179,12 +349,13 @@ async fn test_publish_and_pull_consume() {
 
 /// Test that messages published to different subjects land in the correct stream.
 #[tokio::test]
+#[ignore]
 async fn test_subject_routing_isolation() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client.clone());
     let js = jetstream::new(client);
 
-    let prefix = helpers::unique_subject_prefix();
+    let prefix = unique_subject_prefix();
     let trades_stream = format!("{prefix}_TRADES");
     let ticker_stream = format!("{prefix}_TICKER");
 
@@ -227,7 +398,7 @@ async fn test_subject_routing_isolation() {
     let ct = serialization::content_type(SerializationFormat::Json);
 
     for i in 1..=3 {
-        let trade = helpers::sample_trade_envelope("binance", "BTCUSDT", "BTC/USDT", i);
+        let trade = sample_trade_envelope("binance", "BTCUSDT", "BTC/USDT", i);
         let payload = serialization::serialize_envelope(&trade, SerializationFormat::Json).unwrap();
         publisher
             .publish(&format!("{prefix}.binance.btc-usdt.trade"), &payload, ct)
@@ -236,7 +407,7 @@ async fn test_subject_routing_isolation() {
     }
 
     for i in 1..=2 {
-        let ticker = helpers::sample_ticker_envelope("binance", "BTCUSDT", "BTC/USDT", i);
+        let ticker = sample_ticker_envelope("binance", "BTCUSDT", "BTC/USDT", i);
         let payload =
             serialization::serialize_envelope(&ticker, SerializationFormat::Json).unwrap();
         publisher
@@ -267,15 +438,16 @@ async fn test_subject_routing_isolation() {
 
 /// Test that protobuf serialized data can be decoded back correctly.
 #[tokio::test]
+#[ignore]
 async fn test_protobuf_roundtrip_through_nats() {
     use market2nats::serialization::proto;
     use prost::Message;
 
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client.clone());
     let stream_name = setup_test_stream(&publisher, "PB_ROUNDTRIP").await;
 
-    let envelope = helpers::sample_trade_envelope("binance", "ETHUSDT", "ETH/USDT", 99);
+    let envelope = sample_trade_envelope("binance", "ETHUSDT", "ETH/USDT", 99);
     let subject = format!("{stream_name}.binance.eth-usdt.trade");
     let payload =
         serialization::serialize_envelope(&envelope, SerializationFormat::Protobuf).unwrap();
@@ -285,7 +457,7 @@ async fn test_protobuf_roundtrip_through_nats() {
 
     // Read back and decode protobuf.
     let js = jetstream::new(client);
-    let mut stream = js.get_stream(&stream_name).await.unwrap();
+    let stream = js.get_stream(&stream_name).await.unwrap();
     let msg = stream.direct_get(1).await.unwrap();
 
     let pb_envelope = proto::pb::MarketDataEnvelope::decode(msg.payload.as_ref()).unwrap();
@@ -310,12 +482,13 @@ async fn test_protobuf_roundtrip_through_nats() {
 
 /// Test publishing large L2 orderbook snapshot.
 #[tokio::test]
+#[ignore]
 async fn test_publish_large_l2_snapshot() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client.clone());
     let stream_name = setup_test_stream(&publisher, "PUB_LARGE_L2").await;
 
-    let envelope = helpers::sample_l2_envelope("binance", "BTCUSDT", "BTC/USDT", 1, true);
+    let envelope = sample_l2_envelope("binance", "BTCUSDT", "BTC/USDT", 1, true);
     let subject = format!("{stream_name}.binance.btc-usdt.l2_orderbook");
     let payload = serialization::serialize_envelope(&envelope, SerializationFormat::Json).unwrap();
     let ct = serialization::content_type(SerializationFormat::Json);
@@ -324,7 +497,7 @@ async fn test_publish_large_l2_snapshot() {
 
     // Read back and verify L2 data.
     let js = jetstream::new(client);
-    let mut stream = js.get_stream(&stream_name).await.unwrap();
+    let stream = js.get_stream(&stream_name).await.unwrap();
     let msg = stream.direct_get(1).await.unwrap();
 
     let deserialized: MarketDataEnvelope = serde_json::from_slice(&msg.payload).unwrap();
@@ -341,8 +514,9 @@ async fn test_publish_large_l2_snapshot() {
 
 /// Test high-throughput publishing (burst of 1000 messages).
 #[tokio::test]
+#[ignore]
 async fn test_burst_publish_1000_messages() {
-    let client = helpers::connect_nats().await;
+    let client = connect_nats().await;
     let publisher = JetStreamPublisher::new(client.clone());
     let stream_name = setup_test_stream(&publisher, "PUB_BURST").await;
 
@@ -350,7 +524,7 @@ async fn test_burst_publish_1000_messages() {
     let count = 1000u64;
 
     for i in 1..=count {
-        let envelope = helpers::sample_trade_envelope("binance", "BTCUSDT", "BTC/USDT", i);
+        let envelope = sample_trade_envelope("binance", "BTCUSDT", "BTC/USDT", i);
         let subject = format!("{stream_name}.binance.btc-usdt.trade");
         let payload =
             serialization::serialize_envelope(&envelope, SerializationFormat::Protobuf).unwrap();
