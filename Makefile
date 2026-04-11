@@ -70,6 +70,12 @@ run:
 run-binance-spot-trades:
 	cargo run --release -- config/relay.binance-spot-trades.toml
 
+# Run the project against Bybit (spot + linear USDT perps) for BTC and ETH.
+# Exercises trade / ticker / l2_orderbook on spot, plus liquidation on linear.
+.PHONY: run-bybit
+run-bybit:
+	cargo run --release -- config/relay.bybit.toml
+
 .PHONY: fix
 fix:
 	cargo fix --allow-staged --allow-dirty
