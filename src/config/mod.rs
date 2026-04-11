@@ -102,4 +102,16 @@ mod tests {
         assert!(!config.venues.is_empty());
         assert!(!config.nats.streams.is_empty());
     }
+
+    #[test]
+    fn test_load_config_parses_binance_spot_trades_profile() {
+        let config = load_config("config/relay.binance-spot-trades.toml").unwrap();
+        assert_eq!(config.venues.len(), 1);
+        let venue = &config.venues[0];
+        assert_eq!(venue.id, "binance");
+        assert_eq!(venue.subscriptions.len(), 2);
+        for sub in &venue.subscriptions {
+            assert_eq!(sub.data_types, vec!["trade".to_owned()]);
+        }
+    }
 }

@@ -7,7 +7,7 @@ use tracing::{error, info, warn};
 use market2nats::application::ports::NatsPublisher;
 use market2nats::application::{
     HealthMonitor, PipelineStats, SequenceTracker, StreamRouter, SubscriptionManager,
-    spawn_stats_logger,
+    register_metrics, spawn_stats_logger,
 };
 use market2nats::config;
 use market2nats::infrastructure::http::{HttpState, start_http_server};
@@ -48,10 +48,11 @@ async fn main() -> Result<(), ServiceError> {
         "starting service"
     );
 
-    // Install Prometheus metrics recorder.
+    // Install Prometheus metrics recorder and register metric descriptions.
     let metrics_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
         .install_recorder()
         .expect("failed to install prometheus recorder");
+    register_metrics();
 
     // Shared components.
     let health_monitor = Arc::new(HealthMonitor::new());

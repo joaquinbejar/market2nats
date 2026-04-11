@@ -1,6 +1,12 @@
 use dashmap::DashMap;
+use metrics::gauge;
 
 use crate::domain::{ConnectionState, ServiceHealth, VenueId};
+
+/// Gauge: per-venue connection state encoded as the `ConnectionState` discriminant.
+pub const METRIC_VENUE_CONNECTION_STATE: &str = "market2nats_venue_connection_state";
+/// Gauge: 1 if the NATS client is connected, 0 otherwise.
+pub const METRIC_NATS_CONNECTED: &str = "market2nats_nats_connected";
 
 /// Tracks connection states per venue and computes overall service health.
 pub struct HealthMonitor {
@@ -21,12 +27,18 @@ impl HealthMonitor {
     /// Updates the connection state for a venue.
     pub fn set_venue_state(&self, venue: &VenueId, state: ConnectionState) {
         self.venue_states.insert(venue.as_str().to_owned(), state);
+        gauge!(
+            METRIC_VENUE_CONNECTION_STATE,
+            "venue" => venue.as_str().to_owned(),
+        )
+        .set(f64::from(state as u8));
     }
 
     /// Updates the NATS connection status.
     pub fn set_nats_connected(&self, connected: bool) {
         self.nats_connected
             .store(connected, std::sync::atomic::Ordering::Relaxed);
+        gauge!(METRIC_NATS_CONNECTED).set(if connected { 1.0 } else { 0.0 });
     }
 
     /// Returns the connection state for a specific venue.

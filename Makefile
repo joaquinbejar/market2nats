@@ -64,6 +64,12 @@ check: test fmt-check lint
 run:
 	cargo run
 
+# Run the project with the Binance spot trades (BTC/ETH) profile.
+# Requires NATS_USER and NATS_PASSWORD in the environment (the TOML resolves ${NATS_USER}/${NATS_PASSWORD}).
+.PHONY: run-binance-spot-trades
+run-binance-spot-trades:
+	cargo run --release -- config/relay.binance-spot-trades.toml
+
 .PHONY: fix
 fix:
 	cargo fix --allow-staged --allow-dirty

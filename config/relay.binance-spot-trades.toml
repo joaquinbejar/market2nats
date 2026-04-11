@@ -1,0 +1,88 @@
+#
+# market2nats — Binance spot trades only (BTC/USDT, ETH/USDT)
+#
+# Minimal relay config that captures ONLY trade events from Binance spot
+# for BTC/USDT and ETH/USDT. Everything else (ticker, orderbook, funding,
+# liquidations, futures) is intentionally excluded.
+#
+# NATS subjects produced:
+#   market.binance.btc-usdt.trade
+#   market.binance.eth-usdt.trade
+#
+
+[service]
+name = "market2nats-binance-spot-trades"
+log_level = "info"
+log_format = "json"
+shutdown_timeout_ms = 5000
+
+[nats]
+urls = ["nats://localhost:4222"]
+connect_timeout_ms = 5000
+reconnect_buffer_size = 8388608
+max_reconnects = -1
+ping_interval_secs = 20
+auth = "userpass"
+username = "${NATS_USER}"
+password = "${NATS_PASSWORD}"
+
+[nats.tls]
+enabled = false
+
+# ── Stream ───────────────────────────────────
+# Reuses the "MARKET_TRADES" stream (name matches the one declared by the full
+# relay.toml profile). ensure_stream() in the publisher keys on name only: if
+# a stream with this name already exists in JetStream it is reused as-is, so
+# this profile coexists with the full profile on the same NATS server without
+# subject-overlap conflicts (error 10065). On a fresh NATS the stream is
+# created with the narrower `market.binance.*.trade` subject.
+
+[[nats.streams]]
+name = "MARKET_TRADES"
+subjects = ["market.binance.*.trade"]
+storage = "file"
+retention = "limits"
+max_age_secs = 86400
+max_bytes = 1073741824
+max_msg_size = 65536
+discard = "old"
+num_replicas = 1
+duplicate_window_secs = 120
+
+# ── Binance Spot ─────────────────────────────
+# Only spot, only trades, only BTC and ETH.
+
+[[venues]]
+id = "binance"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://stream.binance.com:9443/ws"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 30
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+batch_subscribe_template = '{"method":"SUBSCRIBE","params":${params},"id":1}'
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "trade"
+
+[[venues.subscriptions]]
+instrument = "btcusdt"
+canonical_symbol = "BTC/USDT"
+data_types = ["trade"]
+
+[[venues.subscriptions]]
+instrument = "ethusdt"
+canonical_symbol = "ETH/USDT"
+data_types = ["trade"]

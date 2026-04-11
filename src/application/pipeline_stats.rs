@@ -2,7 +2,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use metrics::{counter, gauge};
 use tracing::info;
+
+/// Prometheus metric names exposed by [`PipelineStats`].
+pub const METRIC_PIPELINE_RECEIVED: &str = "market2nats_pipeline_received_total";
+/// Counter: messages successfully published to NATS, labeled by venue and data_type.
+pub const METRIC_PIPELINE_PUBLISHED: &str = "market2nats_pipeline_published_total";
+/// Counter: NATS publish failures, labeled by venue and data_type.
+pub const METRIC_PIPELINE_PUBLISH_ERRORS: &str = "market2nats_pipeline_publish_errors_total";
+/// Counter: serialization failures, labeled by venue and data_type.
+pub const METRIC_PIPELINE_SERIALIZE_ERRORS: &str = "market2nats_pipeline_serialize_errors_total";
+/// Gauge: service uptime in seconds.
+pub const METRIC_PIPELINE_UPTIME: &str = "market2nats_pipeline_uptime_seconds";
 
 /// Key for per-(venue, data_type) counters.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -59,6 +71,12 @@ impl PipelineStats {
             .or_insert_with(StreamCounters::new)
             .received
             .fetch_add(1, Ordering::Relaxed);
+        counter!(
+            METRIC_PIPELINE_RECEIVED,
+            "venue" => venue.to_owned(),
+            "data_type" => data_type.to_owned(),
+        )
+        .increment(1);
     }
 
     /// Records a message successfully published to NATS.
@@ -72,6 +90,12 @@ impl PipelineStats {
             .or_insert_with(StreamCounters::new)
             .published
             .fetch_add(1, Ordering::Relaxed);
+        counter!(
+            METRIC_PIPELINE_PUBLISHED,
+            "venue" => venue.to_owned(),
+            "data_type" => data_type.to_owned(),
+        )
+        .increment(1);
     }
 
     /// Records a NATS publish failure.
@@ -85,6 +109,12 @@ impl PipelineStats {
             .or_insert_with(StreamCounters::new)
             .publish_errors
             .fetch_add(1, Ordering::Relaxed);
+        counter!(
+            METRIC_PIPELINE_PUBLISH_ERRORS,
+            "venue" => venue.to_owned(),
+            "data_type" => data_type.to_owned(),
+        )
+        .increment(1);
     }
 
     /// Records a serialization failure.
@@ -98,12 +128,21 @@ impl PipelineStats {
             .or_insert_with(StreamCounters::new)
             .serialize_errors
             .fetch_add(1, Ordering::Relaxed);
+        counter!(
+            METRIC_PIPELINE_SERIALIZE_ERRORS,
+            "venue" => venue.to_owned(),
+            "data_type" => data_type.to_owned(),
+        )
+        .increment(1);
     }
 
     /// Logs a summary of all counters and returns totals.
     pub fn log_summary(&self) {
         let uptime = self.started_at.elapsed();
         let uptime_secs = uptime.as_secs();
+
+        #[allow(clippy::cast_precision_loss)]
+        gauge!(METRIC_PIPELINE_UPTIME).set(uptime_secs as f64);
 
         let mut total_received: u64 = 0;
         let mut total_published: u64 = 0;
