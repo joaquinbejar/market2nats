@@ -6,10 +6,36 @@ use serde::Deserialize;
 pub struct AppConfig {
     /// Service-level settings.
     pub service: ServiceConfig,
+    /// Wire serialization settings for messages published to NATS.
+    #[serde(default)]
+    pub serialization: SerializationSettings,
     /// NATS connection and JetStream settings.
     pub nats: NatsConfig,
     /// Venue definitions.
     pub venues: Vec<VenueConfig>,
+}
+
+/// Wire serialization settings for NATS-published messages.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SerializationSettings {
+    /// Wire format: `"json"` (default) or `"protobuf"`.
+    #[serde(default = "default_serialization_format")]
+    pub format: String,
+}
+
+impl Default for SerializationSettings {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            format: default_serialization_format(),
+        }
+    }
+}
+
+#[inline]
+fn default_serialization_format() -> String {
+    "json".to_owned()
 }
 
 /// Service-level settings.

@@ -106,14 +106,19 @@ async fn main() -> Result<(), ServiceError> {
     // Drop our copy of the event sender so the channel closes when all venue tasks finish.
     drop(event_tx);
 
+    // Resolve wire format from config (default: JSON).
+    let format = match app_config.serialization.format.as_str() {
+        "protobuf" => SerializationFormat::Protobuf,
+        _ => SerializationFormat::Json,
+    };
+    info!(format = ?format, "wire serialization format");
+
     // Spawn the publisher task.
     let pub_publisher = Arc::clone(&publisher);
     let pub_router = Arc::clone(&stream_router);
     let pub_stats = Arc::clone(&pipeline_stats);
     let pub_shutdown = shutdown_rx.clone();
     let publisher_handle = tokio::spawn(async move {
-        // Default to protobuf serialization.
-        let format = SerializationFormat::Protobuf;
         let ct = serialization::content_type(format);
 
         while let Some(envelope) = event_rx.recv().await {

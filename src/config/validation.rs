@@ -19,11 +19,24 @@ pub fn validate_config(config: &AppConfig) -> Vec<ConfigValidationError> {
     let mut errors = Vec::new();
 
     validate_service(&config.service, &mut errors);
+    validate_serialization(&config.serialization, &mut errors);
     validate_nats(&config.nats, &mut errors);
     validate_venues(&config.venues, &mut errors);
     validate_consumer_stream_refs(&config.nats, &mut errors);
 
     errors
+}
+
+fn validate_serialization(
+    serialization: &super::model::SerializationSettings,
+    errors: &mut Vec<ConfigValidationError>,
+) {
+    if !["json", "protobuf"].contains(&serialization.format.as_str()) {
+        errors.push(ConfigValidationError::Rule(format!(
+            "serialization.format must be \"json\" or \"protobuf\", got \"{}\"",
+            serialization.format
+        )));
+    }
 }
 
 fn validate_service(
@@ -232,6 +245,7 @@ mod tests {
                 log_format: "json".to_owned(),
                 shutdown_timeout_ms: 5000,
             },
+            serialization: SerializationSettings::default(),
             nats: NatsConfig {
                 urls: vec!["nats://localhost:4222".to_owned()],
                 connect_timeout_ms: 5000,
@@ -360,5 +374,23 @@ mod tests {
                 .iter()
                 .any(|e| e.to_string().contains("invalid scheme"))
         );
+    }
+
+    #[test]
+    fn test_invalid_serialization_format_rejected() {
+        let mut config = minimal_valid_config();
+        config.serialization.format = "xml".to_owned();
+        let errors = validate_config(&config);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.to_string().contains("serialization.format"))
+        );
+    }
+
+    #[test]
+    fn test_serialization_defaults_to_json() {
+        let config = minimal_valid_config();
+        assert_eq!(config.serialization.format, "json");
     }
 }
