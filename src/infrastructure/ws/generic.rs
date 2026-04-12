@@ -6942,4 +6942,54 @@ mod tests {
             .expect("symbol should be array");
         assert_eq!(symbols.len(), 2);
     }
+
+    #[test]
+    fn test_build_subscribe_object_args_produces_json_objects() {
+        use crate::application::ports::Subscription;
+
+        let conn = ConnectionConfig {
+            ws_url: "wss://example.invalid/ws".to_owned(),
+            reconnect_delay_ms: 1000,
+            max_reconnect_delay_ms: 60000,
+            max_reconnect_attempts: 0,
+            ping_interval_secs: 30,
+            pong_timeout_secs: 10,
+        };
+        let mut cm = HashMap::new();
+        cm.insert("trade".to_owned(), "trades".to_owned());
+        cm.insert("ticker".to_owned(), "tickers".to_owned());
+        let ws_cfg = GenericWsConfig {
+            subscribe_template: None,
+            batch_subscribe_template: Some(r#"{"op":"subscribe","args":${params}}"#.to_owned()),
+            stream_format: r#"{"channel":"${channel}","instId":"${instrument}"}"#.to_owned(),
+            channel_map: cm,
+            message_format: "json".to_owned(),
+            subscribe_mode: "per_pair".to_owned(),
+            args_format: "object".to_owned(),
+            channel_suffix: HashMap::new(),
+        };
+        let adapter =
+            GenericWsAdapter::new("okx", conn, ws_cfg, None).expect("adapter creation succeeds");
+
+        let subs = vec![Subscription {
+            instrument: "BTC-USDT".to_owned(),
+            canonical_symbol: "BTC/USDT".to_owned(),
+            data_types: vec![MarketDataType::Trade, MarketDataType::Ticker],
+        }];
+
+        let msgs = adapter.build_subscribe_messages(&subs);
+        assert_eq!(msgs.len(), 1);
+
+        // Parse the result and verify args is an array of objects, not strings.
+        let parsed: serde_json::Value = serde_json::from_str(&msgs[0]).expect("valid json");
+        let args = parsed["args"].as_array().expect("args should be array");
+        assert_eq!(args.len(), 2);
+        // Each element must be a JSON object, not a string.
+        assert!(args[0].is_object(), "expected object, got: {}", args[0]);
+        assert_eq!(args[0]["channel"].as_str(), Some("trades"));
+        assert_eq!(args[0]["instId"].as_str(), Some("BTC-USDT"));
+        assert!(args[1].is_object(), "expected object, got: {}", args[1]);
+        assert_eq!(args[1]["channel"].as_str(), Some("tickers"));
+        assert_eq!(args[1]["instId"].as_str(), Some("BTC-USDT"));
+    }
 }
