@@ -1,0 +1,136 @@
+#
+# market2nats — BitMEX (XBT/ETH perpetuals)
+#
+# Drop-in profile. BitMEX realtime subscribes with a JSON array of
+# "topic:instrument" string-form args, which the existing generic_ws
+# adapter handles out of the box.
+#
+# Endpoint: wss://ws.bitmex.com/realtime
+#
+# Subscribe shape:
+#   {"op":"subscribe","args":["trade:XBTUSDT","orderBookL2_25:XBTUSDT","liquidation:XBTUSDT","funding:XBTUSDT"]}
+#
+# NATS subjects produced:
+#   market.bitmex.xbt-usdt.trade
+#   market.bitmex.xbt-usdt.ticker
+#   market.bitmex.xbt-usdt.l2_orderbook
+#   market.bitmex.xbt-usdt.funding_rate
+#   market.bitmex.xbt-usdt.liquidation
+#   (same for eth-usdt)
+#
+# BitMEX uses "XBT" instead of "BTC" for Bitcoin. The canonical_symbol in
+# this file reflects BitMEX's own naming so NATS subjects stay truthful to
+# the source venue (xbt-usdt). Aggregating across venues into a single BTC
+# feed is a consumer-side concern.
+
+[service]
+name = "market2nats-bitmex"
+log_level = "info"
+log_format = "json"
+shutdown_timeout_ms = 5000
+
+[serialization]
+format = "json"
+
+[nats]
+urls = ["nats://localhost:4222"]
+connect_timeout_ms = 5000
+reconnect_buffer_size = 8388608
+max_reconnects = -1
+ping_interval_secs = 20
+auth = "userpass"
+username = "${NATS_USER}"
+password = "${NATS_PASSWORD}"
+
+[nats.tls]
+enabled = false
+
+# ── Streams ──────────────────────────────────
+
+[[nats.streams]]
+name = "MARKET_TRADES"
+subjects = ["market.bitmex.*.trade"]
+storage = "file"
+retention = "limits"
+max_age_secs = 86400
+max_bytes = 1073741824
+max_msg_size = 65536
+discard = "old"
+num_replicas = 1
+duplicate_window_secs = 120
+
+[[nats.streams]]
+name = "MARKET_TICKER_BITMEX"
+subjects = ["market.bitmex.*.ticker"]
+storage = "memory"
+retention = "limits"
+max_age_secs = 300
+num_replicas = 1
+
+[[nats.streams]]
+name = "MARKET_ORDERBOOK_BITMEX"
+subjects = ["market.bitmex.*.l2_orderbook"]
+storage = "file"
+retention = "limits"
+max_age_secs = 3600
+max_bytes = 5368709120
+num_replicas = 1
+
+[[nats.streams]]
+name = "MARKET_FUNDING_BITMEX"
+subjects = ["market.bitmex.*.funding_rate"]
+storage = "file"
+retention = "limits"
+max_age_secs = 604800
+num_replicas = 1
+
+[[nats.streams]]
+name = "MARKET_LIQUIDATIONS_BITMEX"
+subjects = ["market.bitmex.*.liquidation"]
+storage = "file"
+retention = "interest"
+max_age_secs = 86400
+num_replicas = 1
+
+# ── BitMEX ───────────────────────────────────
+
+[[venues]]
+id = "bitmex"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://ws.bitmex.com/realtime"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 30
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+batch_subscribe_template = '{"op":"subscribe","args":${params}}'
+stream_format = "${channel}:${instrument}"
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "trade"
+ticker = "quote"
+# orderBookL2_25 is the 25-level snapshot+delta book. Use "orderBookL2" for full book.
+l2_orderbook = "orderBookL2_25"
+funding_rate = "funding"
+liquidation = "liquidation"
+
+[[venues.subscriptions]]
+instrument = "XBTUSDT"
+canonical_symbol = "XBT/USDT"
+data_types = ["trade", "ticker", "l2_orderbook", "funding_rate", "liquidation"]
+
+[[venues.subscriptions]]
+instrument = "ETHUSDT"
+canonical_symbol = "ETH/USDT"
+data_types = ["trade", "ticker", "l2_orderbook", "funding_rate", "liquidation"]

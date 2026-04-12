@@ -76,6 +76,11 @@ run-binance-spot-trades:
 run-bybit:
 	cargo run --release -- config/relay.bybit.toml
 
+# Run the project against BitMEX realtime (XBT/ETH perps).
+.PHONY: run-bitmex
+run-bitmex:
+	cargo run --release -- config/relay.bitmex.toml
+
 .PHONY: fix
 fix:
 	cargo fix --allow-staged --allow-dirty
