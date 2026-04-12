@@ -1,0 +1,125 @@
+#
+# market2nats — Coinbase Exchange (spot, US-regulated)
+#
+# Parser-tweak profile. Coinbase Exchange's public WebSocket subscribes
+# with a payload of the shape:
+#
+#   {"type":"subscribe","product_ids":["BTC-USD","ETH-USD"],"channels":["matches","ticker","level2_batch"]}
+#
+# Unlike Binance/Bybit/BitMEX which use a flat array of "channel:instrument"
+# string pairs, Coinbase separates product_ids and channels into two
+# independent arrays. The current generic_ws builder produces one combined
+# array from (instrument, channel) pairs, which doesn't match.
+#
+# Endpoint: wss://ws-feed.exchange.coinbase.com
+#
+# Supported canonical data types on Coinbase Exchange public WS:
+#   trade          → matches
+#   ticker         → ticker
+#   l2_orderbook   → level2_batch  (50ms aggregated diffs)
+#                    or level2      (tick-by-tick, heavier)
+#
+# Coinbase Exchange is spot only. Coinbase Derivatives (futures) runs on
+# a separate regulated venue with its own FIX/API stack — out of scope.
+#
+# NATS subjects produced:
+#   market.coinbase.btc-usd.trade|ticker|l2_orderbook
+#   market.coinbase.eth-usd.trade|ticker|l2_orderbook
+
+[service]
+name = "market2nats-coinbase"
+log_level = "info"
+log_format = "json"
+shutdown_timeout_ms = 5000
+
+[serialization]
+format = "json"
+
+[nats]
+urls = ["nats://localhost:4222"]
+connect_timeout_ms = 5000
+reconnect_buffer_size = 8388608
+max_reconnects = -1
+ping_interval_secs = 20
+auth = "userpass"
+username = "${NATS_USER}"
+password = "${NATS_PASSWORD}"
+
+[nats.tls]
+enabled = false
+
+# ── Streams ──────────────────────────────────
+
+[[nats.streams]]
+name = "MARKET_TRADES"
+subjects = ["market.coinbase.*.trade"]
+storage = "file"
+retention = "limits"
+max_age_secs = 86400
+max_bytes = 1073741824
+max_msg_size = 65536
+discard = "old"
+num_replicas = 1
+duplicate_window_secs = 120
+
+[[nats.streams]]
+name = "MARKET_TICKER_COINBASE"
+subjects = ["market.coinbase.*.ticker"]
+storage = "memory"
+retention = "limits"
+max_age_secs = 300
+num_replicas = 1
+
+[[nats.streams]]
+name = "MARKET_ORDERBOOK_COINBASE"
+subjects = ["market.coinbase.*.l2_orderbook"]
+storage = "file"
+retention = "limits"
+max_age_secs = 3600
+max_bytes = 5368709120
+num_replicas = 1
+
+# ── Coinbase Exchange ────────────────────────
+
+[[venues]]
+id = "coinbase"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://ws-feed.exchange.coinbase.com"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 30
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+# Target shape once the "products_channels" adapter mode lands. A single
+# batch frame with product_ids and channels as separate arrays.
+batch_subscribe_template = '{"type":"subscribe","product_ids":${instruments},"channels":${channels}}'
+# Coinbase does not use per-pair stream names, so stream_format is a no-op
+# in this mode. Leaving a placeholder here to keep the TOML well-formed.
+stream_format = "${channel}"
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "matches"
+ticker = "ticker"
+# level2_batch: 50ms aggregated diffs (preferred). Use "level2" for TBT.
+l2_orderbook = "level2_batch"
+
+[[venues.subscriptions]]
+instrument = "BTC-USD"
+canonical_symbol = "BTC/USD"
+data_types = ["trade", "ticker", "l2_orderbook"]
+
+[[venues.subscriptions]]
+instrument = "ETH-USD"
+canonical_symbol = "ETH/USD"
+data_types = ["trade", "ticker", "l2_orderbook"]
