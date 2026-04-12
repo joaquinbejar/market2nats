@@ -214,6 +214,7 @@ impl GenericWsAdapter {
             "bitstamp" => return self.parse_bitstamp_envelope(&value),
             "hyperliquid" => return self.parse_hyperliquid_envelope(&value),
             "crypto-com" | "crypto-com-perp" => return self.parse_crypto_com_envelope(&value),
+            "kraken" => return self.parse_kraken_envelope(&value),
             _ => {}
         }
 
@@ -945,6 +946,176 @@ impl GenericWsAdapter {
                 }
             }
             _ => {}
+        }
+        Ok(events)
+    }
+
+    /// Parses a Kraken v2 public stream envelope:
+    /// `{"channel":"trade","type":"snapshot|update","data":[{...}]}`.
+    ///
+    /// Supported channels:
+    /// - `trade`  → [`MarketDataType::Trade`]
+    /// - `ticker` → [`MarketDataType::Ticker`]
+    /// - `book`   → [`MarketDataType::L2Orderbook`]
+    ///
+    /// Kraken's book channel uses `{price, qty}` level objects rather than
+    /// the `[price, qty]` tuples used by Binance-family venues, so it needs
+    /// its own level parser.
+    fn parse_kraken_envelope(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        let channel = match value.get("channel").and_then(|v| v.as_str()) {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+        // Control events: "status", "heartbeat", "pong" — no market data.
+        if matches!(channel, "status" | "heartbeat" | "pong") {
+            return Ok(Vec::new());
+        }
+        let type_str = value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("update");
+        let data_arr = match value.get("data").and_then(|v| v.as_array()) {
+            Some(a) => a,
+            None => return Ok(Vec::new()),
+        };
+
+        let mut events = Vec::new();
+        for item in data_arr {
+            let symbol = match item.get("symbol").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => continue,
+            };
+            let canonical = match self.lookup_canonical(symbol) {
+                Some(c) => c,
+                None => continue,
+            };
+            let instrument_id =
+                InstrumentId::try_new(symbol).map_err(|e| VenueError::ReceiveFailed {
+                    venue: self.venue_id.as_str().to_owned(),
+                    reason: e.to_string(),
+                })?;
+            let canonical_symbol =
+                CanonicalSymbol::try_new(&canonical).map_err(|e| VenueError::ReceiveFailed {
+                    venue: self.venue_id.as_str().to_owned(),
+                    reason: e.to_string(),
+                })?;
+
+            match channel {
+                "trade" => {
+                    let price = match extract_decimal(item, &["price"])
+                        .and_then(|d| Price::try_new(d).ok())
+                    {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let quantity = match extract_decimal(item, &["qty"])
+                        .and_then(|d| Quantity::try_new(d).ok())
+                    {
+                        Some(q) => q,
+                        None => continue,
+                    };
+                    let side = item
+                        .get("side")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| Side::from_str_loose(s).ok())
+                        .unwrap_or(Side::Buy);
+                    let trade_id = item.get("trade_id").and_then(|v| {
+                        if let Some(s) = v.as_str() {
+                            Some(s.to_owned())
+                        } else {
+                            v.as_u64().map(|n| n.to_string())
+                        }
+                    });
+                    events.push(MarketDataEnvelope {
+                        venue: self.venue_id.clone(),
+                        instrument: instrument_id,
+                        canonical_symbol,
+                        data_type: MarketDataType::Trade,
+                        received_at: Timestamp::now(),
+                        exchange_timestamp: None,
+                        sequence: Sequence::new(0),
+                        payload: MarketDataPayload::Trade(Trade {
+                            price,
+                            quantity,
+                            side,
+                            trade_id,
+                        }),
+                    });
+                }
+                "ticker" => {
+                    let bid_price = match extract_decimal(item, &["bid"])
+                        .and_then(|d| Price::try_new(d).ok())
+                    {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let bid_qty = match extract_decimal(item, &["bid_qty"])
+                        .and_then(|d| Quantity::try_new(d).ok())
+                    {
+                        Some(q) => q,
+                        None => continue,
+                    };
+                    let ask_price = match extract_decimal(item, &["ask"])
+                        .and_then(|d| Price::try_new(d).ok())
+                    {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let ask_qty = match extract_decimal(item, &["ask_qty"])
+                        .and_then(|d| Quantity::try_new(d).ok())
+                    {
+                        Some(q) => q,
+                        None => continue,
+                    };
+                    let last_price = match extract_decimal(item, &["last"])
+                        .and_then(|d| Price::try_new(d).ok())
+                    {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    events.push(MarketDataEnvelope {
+                        venue: self.venue_id.clone(),
+                        instrument: instrument_id,
+                        canonical_symbol,
+                        data_type: MarketDataType::Ticker,
+                        received_at: Timestamp::now(),
+                        exchange_timestamp: None,
+                        sequence: Sequence::new(0),
+                        payload: MarketDataPayload::Ticker(Ticker {
+                            bid_price,
+                            bid_qty,
+                            ask_price,
+                            ask_qty,
+                            last_price,
+                        }),
+                    });
+                }
+                "book" => {
+                    let bids = parse_kraken_levels(item.get("bids"));
+                    let asks = parse_kraken_levels(item.get("asks"));
+                    if bids.is_empty() && asks.is_empty() {
+                        continue;
+                    }
+                    events.push(MarketDataEnvelope {
+                        venue: self.venue_id.clone(),
+                        instrument: instrument_id,
+                        canonical_symbol,
+                        data_type: MarketDataType::L2Orderbook,
+                        received_at: Timestamp::now(),
+                        exchange_timestamp: None,
+                        sequence: Sequence::new(0),
+                        payload: MarketDataPayload::L2Update(L2Update {
+                            bids,
+                            asks,
+                            is_snapshot: type_str == "snapshot",
+                        }),
+                    });
+                }
+                _ => {}
+            }
         }
         Ok(events)
     }
@@ -2092,6 +2263,28 @@ fn parse_hyperliquid_levels(value: Option<&serde_json::Value>) -> Vec<(Price, Qu
     levels
 }
 
+/// Parses Kraken v2 book levels: array of `{price, qty}` objects.
+#[must_use]
+fn parse_kraken_levels(value: Option<&serde_json::Value>) -> Vec<(Price, Quantity)> {
+    let arr = match value.and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    let mut levels = Vec::with_capacity(arr.len());
+    for item in arr {
+        let price = match extract_decimal(item, &["price"]).and_then(|d| Price::try_new(d).ok()) {
+            Some(p) => p,
+            None => continue,
+        };
+        let qty = match extract_decimal(item, &["qty"]).and_then(|d| Quantity::try_new(d).ok()) {
+            Some(q) => q,
+            None => continue,
+        };
+        levels.push((price, qty));
+    }
+    levels
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2949,6 +3142,166 @@ mod tests {
     fn test_crypto_com_unknown_channel_returns_empty() {
         let adapter = make_crypto_com_adapter("crypto-com");
         let msg = r#"{"method":"subscribe","result":{"instrument_name":"BTC_USDT","channel":"candlestick","data":[]}}"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert!(events.is_empty());
+    }
+
+    fn make_kraken_adapter() -> GenericWsAdapter {
+        let conn = ConnectionConfig {
+            ws_url: "wss://example.invalid/ws".to_owned(),
+            reconnect_delay_ms: 1000,
+            max_reconnect_delay_ms: 60000,
+            max_reconnect_attempts: 0,
+            ping_interval_secs: 25,
+            pong_timeout_secs: 10,
+        };
+        let mut cm = HashMap::new();
+        cm.insert("trade".to_owned(), "trade".to_owned());
+        cm.insert("ticker".to_owned(), "ticker".to_owned());
+        cm.insert("l2_orderbook".to_owned(), "book".to_owned());
+        let ws_cfg = GenericWsConfig {
+            subscribe_template: None,
+            batch_subscribe_template: None,
+            stream_format: "${channel}".to_owned(),
+            channel_map: cm,
+            message_format: "json".to_owned(),
+        };
+        let mut adapter =
+            GenericWsAdapter::new("kraken", conn, ws_cfg, None).expect("adapter creation succeeds");
+        adapter
+            .instrument_map
+            .insert("BTC/USD".to_owned(), "BTC/USD".to_owned());
+        adapter
+            .instrument_map
+            .insert("ETH/USD".to_owned(), "ETH/USD".to_owned());
+        adapter
+    }
+
+    #[test]
+    fn test_kraken_parse_trade_yields_trade() {
+        let adapter = make_kraken_adapter();
+        let msg = r#"{
+            "channel": "trade",
+            "type": "update",
+            "data": [{
+                "symbol": "BTC/USD",
+                "side": "buy",
+                "qty": 0.0001,
+                "price": 42000.5,
+                "ord_type": "market",
+                "trade_id": 123456789,
+                "timestamp": "2021-04-17T12:00:00.123456Z"
+            }]
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::Trade(t) => {
+                assert_eq!(t.side, Side::Buy);
+                assert_eq!(t.trade_id.as_deref(), Some("123456789"));
+            }
+            other => panic!("expected Trade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_kraken_parse_ticker_yields_ticker() {
+        let adapter = make_kraken_adapter();
+        let msg = r#"{
+            "channel": "ticker",
+            "type": "snapshot",
+            "data": [{
+                "symbol": "BTC/USD",
+                "bid": 42000.3,
+                "bid_qty": 0.5,
+                "ask": 42000.7,
+                "ask_qty": 0.3,
+                "last": 42000.5,
+                "volume": 1234.56,
+                "vwap": 41900.0,
+                "low": 41000.0,
+                "high": 42500.0,
+                "change": 100.0,
+                "change_pct": 0.25
+            }]
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::Ticker(_) => {}
+            other => panic!("expected Ticker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_kraken_parse_book_snapshot_uses_object_levels() {
+        let adapter = make_kraken_adapter();
+        let msg = r#"{
+            "channel": "book",
+            "type": "snapshot",
+            "data": [{
+                "symbol": "BTC/USD",
+                "bids": [
+                    {"price": 42000.0, "qty": 0.5},
+                    {"price": 41999.0, "qty": 1.0}
+                ],
+                "asks": [
+                    {"price": 42001.0, "qty": 0.3},
+                    {"price": 42002.0, "qty": 0.8}
+                ],
+                "checksum": 3145678912
+            }]
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => {
+                assert!(u.is_snapshot);
+                assert_eq!(u.bids.len(), 2);
+                assert_eq!(u.asks.len(), 2);
+            }
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_kraken_parse_book_update_flags_not_snapshot() {
+        let adapter = make_kraken_adapter();
+        let msg = r#"{
+            "channel": "book",
+            "type": "update",
+            "data": [{
+                "symbol": "BTC/USD",
+                "bids": [{"price": 42000.5, "qty": 0.0}],
+                "asks": [],
+                "checksum": 1
+            }]
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => assert!(!u.is_snapshot),
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_kraken_control_channels_return_empty() {
+        let adapter = make_kraken_adapter();
+        for msg in [
+            r#"{"channel":"status","type":"update","data":[]}"#,
+            r#"{"channel":"heartbeat"}"#,
+            r#"{"channel":"pong"}"#,
+        ] {
+            let events = adapter.parse_message(msg).expect("parse ok");
+            assert!(events.is_empty(), "control channel produced events: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_kraken_unknown_channel_returns_empty() {
+        let adapter = make_kraken_adapter();
+        let msg = r#"{"channel":"ohlc","type":"update","data":[]}"#;
         let events = adapter.parse_message(msg).expect("parse ok");
         assert!(events.is_empty());
     }
