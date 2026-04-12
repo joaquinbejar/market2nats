@@ -19,7 +19,7 @@ RUN mkdir -p crates/market2nats/src && \
 
 # Copy real source and build.
 COPY crates/market2nats/src/ crates/market2nats/src/
-RUN cargo build --release --bin market2nats
+RUN cargo build --release -p market2nats --bin market2nats
 
 # ── Runtime ──────────────────────────────────────────────────────────────
 
