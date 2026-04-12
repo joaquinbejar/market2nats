@@ -219,6 +219,7 @@ impl GenericWsAdapter {
             "gate" | "gate-futures" => return self.parse_gate_envelope(&value),
             "okx" | "okx-swap" => return self.parse_okx_envelope(&value),
             "coinbase" => return self.parse_coinbase_envelope(&value),
+            "deribit" => return self.parse_deribit_envelope(&value),
             _ => {}
         }
 
@@ -3263,6 +3264,315 @@ impl GenericWsAdapter {
             _ => Ok(Vec::new()),
         }
     }
+
+    // ── Deribit v2 ──────────────────────────────────────────────────────
+    //
+    // Deribit uses JSON-RPC 2.0 over WS. Subscriptions arrive as:
+    //   {"jsonrpc":"2.0","method":"subscription","params":{"channel":"<ch>","data":{...}}}
+    // Ack/response frames have "id" but not "method":"subscription".
+    //
+    // Channel patterns:
+    //   trades.<instrument>.<rate>  → Trade (+ Liquidation tap when liquidation != "none")
+    //   ticker.<instrument>.<rate>  → Ticker (+ FundingRate tap for perpetuals)
+    //   book.<instrument>.<group>.<depth>.<interval> → L2Update (snapshot | change)
+    fn parse_deribit_envelope(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        // Acks / responses to public/subscribe have `id` but no `method`.
+        if value.get("method").and_then(|v| v.as_str()) != Some("subscription") {
+            return Ok(Vec::new());
+        }
+        let params = match value.get("params") {
+            Some(p) => p,
+            None => return Ok(Vec::new()),
+        };
+        let channel = match params.get("channel").and_then(|v| v.as_str()) {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+        let data = match params.get("data") {
+            Some(d) => d,
+            None => return Ok(Vec::new()),
+        };
+
+        if let Some(rest) = channel.strip_prefix("trades.") {
+            // Channel tail: "{instrument}.{rate}"
+            let instrument_str = match rest.split('.').next() {
+                Some(i) => i,
+                None => return Ok(Vec::new()),
+            };
+            let (instrument, canonical) = match self.resolve_deribit_instrument(instrument_str) {
+                Some(x) => x,
+                None => return Ok(Vec::new()),
+            };
+            let trades_arr = match data.as_array() {
+                Some(a) => a,
+                None => return Ok(Vec::new()),
+            };
+            let mut events = Vec::with_capacity(trades_arr.len());
+            for item in trades_arr {
+                if let Some(ev) =
+                    self.build_deribit_trade(item, instrument.clone(), canonical.clone())?
+                {
+                    events.push(ev);
+                }
+                // Liquidation tap -- trade.liquidation in {"M", "T", "MT"} is a
+                // public forced-close fill; "none" or absent means normal.
+                if let Some(flag) = item.get("liquidation").and_then(|v| v.as_str())
+                    && flag != "none"
+                    && let Some(ev) =
+                        self.build_deribit_liquidation(item, instrument.clone(), canonical.clone())?
+                {
+                    events.push(ev);
+                }
+            }
+            return Ok(events);
+        }
+
+        if let Some(rest) = channel.strip_prefix("ticker.") {
+            let instrument_str = match rest.split('.').next() {
+                Some(i) => i,
+                None => return Ok(Vec::new()),
+            };
+            let (instrument, canonical) = match self.resolve_deribit_instrument(instrument_str) {
+                Some(x) => x,
+                None => return Ok(Vec::new()),
+            };
+            let mut events = Vec::new();
+            if let Some(ev) =
+                self.build_deribit_ticker(data, instrument.clone(), canonical.clone())?
+            {
+                events.push(ev);
+            }
+            // Funding tap -- perpetuals ship current_funding / funding_8h.
+            if data.get("current_funding").is_some()
+                && let Some(ev) = self.build_deribit_funding(data, instrument, canonical)?
+            {
+                events.push(ev);
+            }
+            return Ok(events);
+        }
+
+        if let Some(rest) = channel.strip_prefix("book.") {
+            // book.{instrument}.{group}.{depth}.{interval}
+            let instrument_str = match rest.split('.').next() {
+                Some(i) => i,
+                None => return Ok(Vec::new()),
+            };
+            let (instrument, canonical) = match self.resolve_deribit_instrument(instrument_str) {
+                Some(x) => x,
+                None => return Ok(Vec::new()),
+            };
+            let book_type = data
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("change");
+            let bids = parse_deribit_book_side(data.get("bids"));
+            let asks = parse_deribit_book_side(data.get("asks"));
+            if bids.is_empty() && asks.is_empty() {
+                return Ok(Vec::new());
+            }
+            return Ok(vec![MarketDataEnvelope {
+                venue: self.venue_id.clone(),
+                instrument,
+                canonical_symbol: canonical,
+                data_type: MarketDataType::L2Orderbook,
+                received_at: Timestamp::now(),
+                exchange_timestamp: data
+                    .get("timestamp")
+                    .and_then(|v| v.as_u64())
+                    .map(Timestamp::new),
+                sequence: Sequence::new(0),
+                payload: MarketDataPayload::L2Update(L2Update {
+                    bids,
+                    asks,
+                    is_snapshot: book_type == "snapshot",
+                }),
+            }]);
+        }
+
+        Ok(Vec::new())
+    }
+
+    fn resolve_deribit_instrument(
+        &self,
+        instrument_str: &str,
+    ) -> Option<(InstrumentId, CanonicalSymbol)> {
+        let canonical = self.lookup_canonical(instrument_str)?;
+        let instrument_id = InstrumentId::try_new(instrument_str).ok()?;
+        let canonical_symbol = CanonicalSymbol::try_new(&canonical).ok()?;
+        Some((instrument_id, canonical_symbol))
+    }
+
+    fn build_deribit_trade(
+        &self,
+        item: &serde_json::Value,
+        instrument: InstrumentId,
+        canonical: CanonicalSymbol,
+    ) -> Result<Option<MarketDataEnvelope>, VenueError> {
+        let price = match extract_decimal(item, &["price"]).and_then(|d| Price::try_new(d).ok()) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let quantity =
+            match extract_decimal(item, &["amount"]).and_then(|d| Quantity::try_new(d).ok()) {
+                Some(q) => q,
+                None => return Ok(None),
+            };
+        let side = item
+            .get("direction")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Side::from_str_loose(s).ok())
+            .unwrap_or(Side::Buy);
+        let trade_id = item
+            .get("trade_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_owned());
+        let exchange_ts = item
+            .get("timestamp")
+            .and_then(|v| v.as_u64())
+            .map(Timestamp::new);
+        Ok(Some(MarketDataEnvelope {
+            venue: self.venue_id.clone(),
+            instrument,
+            canonical_symbol: canonical,
+            data_type: MarketDataType::Trade,
+            received_at: Timestamp::now(),
+            exchange_timestamp: exchange_ts,
+            sequence: Sequence::new(0),
+            payload: MarketDataPayload::Trade(Trade {
+                price,
+                quantity,
+                side,
+                trade_id,
+            }),
+        }))
+    }
+
+    fn build_deribit_liquidation(
+        &self,
+        item: &serde_json::Value,
+        instrument: InstrumentId,
+        canonical: CanonicalSymbol,
+    ) -> Result<Option<MarketDataEnvelope>, VenueError> {
+        let price = match extract_decimal(item, &["price"]).and_then(|d| Price::try_new(d).ok()) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let quantity =
+            match extract_decimal(item, &["amount"]).and_then(|d| Quantity::try_new(d).ok()) {
+                Some(q) => q,
+                None => return Ok(None),
+            };
+        let side = item
+            .get("direction")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Side::from_str_loose(s).ok())
+            .unwrap_or(Side::Sell);
+        let exchange_ts = item
+            .get("timestamp")
+            .and_then(|v| v.as_u64())
+            .map(Timestamp::new);
+        Ok(Some(MarketDataEnvelope {
+            venue: self.venue_id.clone(),
+            instrument,
+            canonical_symbol: canonical,
+            data_type: MarketDataType::Liquidation,
+            received_at: Timestamp::now(),
+            exchange_timestamp: exchange_ts,
+            sequence: Sequence::new(0),
+            payload: MarketDataPayload::Liquidation(Liquidation {
+                side,
+                price,
+                quantity,
+            }),
+        }))
+    }
+
+    fn build_deribit_ticker(
+        &self,
+        data: &serde_json::Value,
+        instrument: InstrumentId,
+        canonical: CanonicalSymbol,
+    ) -> Result<Option<MarketDataEnvelope>, VenueError> {
+        let bid_price =
+            match extract_decimal(data, &["best_bid_price"]).and_then(|d| Price::try_new(d).ok()) {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+        let bid_qty = match extract_decimal(data, &["best_bid_amount"])
+            .and_then(|d| Quantity::try_new(d).ok())
+        {
+            Some(q) => q,
+            None => return Ok(None),
+        };
+        let ask_price =
+            match extract_decimal(data, &["best_ask_price"]).and_then(|d| Price::try_new(d).ok()) {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+        let ask_qty = match extract_decimal(data, &["best_ask_amount"])
+            .and_then(|d| Quantity::try_new(d).ok())
+        {
+            Some(q) => q,
+            None => return Ok(None),
+        };
+        let last_price =
+            match extract_decimal(data, &["last_price"]).and_then(|d| Price::try_new(d).ok()) {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+        Ok(Some(MarketDataEnvelope {
+            venue: self.venue_id.clone(),
+            instrument,
+            canonical_symbol: canonical,
+            data_type: MarketDataType::Ticker,
+            received_at: Timestamp::now(),
+            exchange_timestamp: data
+                .get("timestamp")
+                .and_then(|v| v.as_u64())
+                .map(Timestamp::new),
+            sequence: Sequence::new(0),
+            payload: MarketDataPayload::Ticker(Ticker {
+                bid_price,
+                bid_qty,
+                ask_price,
+                ask_qty,
+                last_price,
+            }),
+        }))
+    }
+
+    fn build_deribit_funding(
+        &self,
+        data: &serde_json::Value,
+        instrument: InstrumentId,
+        canonical: CanonicalSymbol,
+    ) -> Result<Option<MarketDataEnvelope>, VenueError> {
+        let rate = match extract_decimal(data, &["current_funding"]) {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let predicted = extract_decimal(data, &["funding_8h"]);
+        Ok(Some(MarketDataEnvelope {
+            venue: self.venue_id.clone(),
+            instrument,
+            canonical_symbol: canonical,
+            data_type: MarketDataType::FundingRate,
+            received_at: Timestamp::now(),
+            exchange_timestamp: data
+                .get("timestamp")
+                .and_then(|v| v.as_u64())
+                .map(Timestamp::new),
+            sequence: Sequence::new(0),
+            payload: MarketDataPayload::FundingRate(FundingRate {
+                rate,
+                predicted_rate: predicted,
+                next_funding_at: Timestamp::new(0),
+            }),
+        }))
+    }
 }
 
 impl VenueAdapter for GenericWsAdapter {
@@ -3567,6 +3877,56 @@ fn parse_kraken_levels(value: Option<&serde_json::Value>) -> Vec<(Price, Quantit
             None => continue,
         };
         let qty = match extract_decimal(item, &["qty"]).and_then(|d| Quantity::try_new(d).ok()) {
+            Some(q) => q,
+            None => continue,
+        };
+        levels.push((price, qty));
+    }
+    levels
+}
+
+/// Parses Deribit order-book level arrays.
+///
+/// Deribit sends 3-element arrays: `["new"|"change"|"delete", price, amount]`.
+/// Price and amount may be JSON numbers (f64) or occasionally strings.
+fn parse_deribit_book_side(value: Option<&serde_json::Value>) -> Vec<(Price, Quantity)> {
+    let arr = match value.and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    let mut levels = Vec::with_capacity(arr.len());
+    for item in arr {
+        let inner = match item.as_array().filter(|a| a.len() >= 3) {
+            Some(i) => i,
+            None => continue,
+        };
+        let price = match inner
+            .get(1)
+            .and_then(|v| v.as_f64())
+            .and_then(|f| Decimal::try_from(f).ok())
+            .or_else(|| {
+                inner
+                    .get(1)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<Decimal>().ok())
+            })
+            .and_then(|d| Price::try_new(d).ok())
+        {
+            Some(p) => p,
+            None => continue,
+        };
+        let qty = match inner
+            .get(2)
+            .and_then(|v| v.as_f64())
+            .and_then(|f| Decimal::try_from(f).ok())
+            .or_else(|| {
+                inner
+                    .get(2)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<Decimal>().ok())
+            })
+            .and_then(|d| Quantity::try_new(d).ok())
+        {
             Some(q) => q,
             None => continue,
         };
@@ -5270,6 +5630,201 @@ mod tests {
     fn test_coinbase_unknown_type_returns_empty() {
         let adapter = make_coinbase_adapter();
         let msg = r#"{"type":"received","product_id":"BTC-USD"}"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert!(events.is_empty());
+    }
+
+    // ── Deribit v2 ──────────────────────────────────────────────────────
+
+    fn make_deribit_adapter() -> GenericWsAdapter {
+        let conn = ConnectionConfig {
+            ws_url: "wss://example.invalid/ws".to_owned(),
+            reconnect_delay_ms: 1000,
+            max_reconnect_delay_ms: 60000,
+            max_reconnect_attempts: 0,
+            ping_interval_secs: 30,
+            pong_timeout_secs: 10,
+        };
+        let mut cm = HashMap::new();
+        cm.insert("trade".to_owned(), "trades".to_owned());
+        cm.insert("ticker".to_owned(), "ticker".to_owned());
+        cm.insert("l2_orderbook".to_owned(), "book".to_owned());
+        cm.insert("funding_rate".to_owned(), "ticker".to_owned());
+        cm.insert("liquidation".to_owned(), "trades".to_owned());
+        let ws_cfg = GenericWsConfig {
+            subscribe_template: None,
+            batch_subscribe_template: None,
+            stream_format: "${channel}".to_owned(),
+            channel_map: cm,
+            message_format: "json".to_owned(),
+        };
+        let mut adapter = GenericWsAdapter::new("deribit", conn, ws_cfg, None)
+            .expect("adapter creation succeeds");
+        adapter
+            .instrument_map
+            .insert("BTC-PERPETUAL".to_owned(), "BTC/PERP".to_owned());
+        adapter
+            .instrument_map
+            .insert("ETH-PERPETUAL".to_owned(), "ETH/PERP".to_owned());
+        adapter
+    }
+
+    #[test]
+    fn test_deribit_parse_trade_notification_yields_trade() {
+        let adapter = make_deribit_adapter();
+        let msg = r#"{
+            "jsonrpc": "2.0",
+            "method": "subscription",
+            "params": {
+                "channel": "trades.BTC-PERPETUAL.raw",
+                "data": [{
+                    "trade_seq": 97095,
+                    "trade_id": "BTC-2100000",
+                    "timestamp": 1700000000123,
+                    "tick_direction": 0,
+                    "price": 42000.5,
+                    "mark_price": 42000.4,
+                    "instrument_name": "BTC-PERPETUAL",
+                    "index_price": 42000.2,
+                    "direction": "buy",
+                    "amount": 10.0,
+                    "liquidation": "none"
+                }]
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::Trade(t) => {
+                assert_eq!(t.side, Side::Buy);
+                assert_eq!(t.trade_id.as_deref(), Some("BTC-2100000"));
+            }
+            other => panic!("expected Trade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_deribit_parse_trade_with_liquidation_flag_emits_both() {
+        let adapter = make_deribit_adapter();
+        let msg = r#"{
+            "jsonrpc": "2.0",
+            "method": "subscription",
+            "params": {
+                "channel": "trades.BTC-PERPETUAL.raw",
+                "data": [{
+                    "trade_seq": 97096,
+                    "trade_id": "BTC-2100001",
+                    "timestamp": 1700000000200,
+                    "price": 42001.0,
+                    "instrument_name": "BTC-PERPETUAL",
+                    "direction": "sell",
+                    "amount": 20.0,
+                    "liquidation": "M"
+                }]
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].data_type, MarketDataType::Trade);
+        assert_eq!(events[1].data_type, MarketDataType::Liquidation);
+    }
+
+    #[test]
+    fn test_deribit_parse_ticker_with_funding_emits_both() {
+        let adapter = make_deribit_adapter();
+        let msg = r#"{
+            "jsonrpc": "2.0",
+            "method": "subscription",
+            "params": {
+                "channel": "ticker.BTC-PERPETUAL.raw",
+                "data": {
+                    "timestamp": 1700000000123,
+                    "stats": {"volume": 12345.6, "low": 41000.0, "high": 42500.0},
+                    "state": "open",
+                    "settlement_price": 42000.0,
+                    "open_interest": 300000000,
+                    "min_price": 41800.0,
+                    "max_price": 42200.0,
+                    "mark_price": 42000.4,
+                    "last_price": 42000.5,
+                    "instrument_name": "BTC-PERPETUAL",
+                    "index_price": 42000.2,
+                    "funding_8h": 0.0001,
+                    "current_funding": 0.00005,
+                    "estimated_delivery_price": 42000.2,
+                    "best_bid_price": 42000.3,
+                    "best_bid_amount": 500,
+                    "best_ask_price": 42000.7,
+                    "best_ask_amount": 300
+                }
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].data_type, MarketDataType::Ticker);
+        assert_eq!(events[1].data_type, MarketDataType::FundingRate);
+    }
+
+    #[test]
+    fn test_deribit_parse_book_snapshot_three_element_levels() {
+        let adapter = make_deribit_adapter();
+        let msg = r#"{
+            "jsonrpc": "2.0",
+            "method": "subscription",
+            "params": {
+                "channel": "book.BTC-PERPETUAL.none.20.100ms",
+                "data": {
+                    "type": "snapshot",
+                    "timestamp": 1700000000123,
+                    "instrument_name": "BTC-PERPETUAL",
+                    "change_id": 12345,
+                    "bids": [["new", 42000.0, 500.0], ["new", 41999.0, 1000.0]],
+                    "asks": [["new", 42001.0, 300.0]]
+                }
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => {
+                assert!(u.is_snapshot);
+                assert_eq!(u.bids.len(), 2);
+                assert_eq!(u.asks.len(), 1);
+            }
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_deribit_parse_book_change_flags_not_snapshot() {
+        let adapter = make_deribit_adapter();
+        let msg = r#"{
+            "jsonrpc": "2.0",
+            "method": "subscription",
+            "params": {
+                "channel": "book.BTC-PERPETUAL.none.20.100ms",
+                "data": {
+                    "type": "change",
+                    "timestamp": 1700000000124,
+                    "instrument_name": "BTC-PERPETUAL",
+                    "change_id": 12346,
+                    "bids": [["change", 42000.0, 600.0]],
+                    "asks": [["delete", 42001.0, 0.0]]
+                }
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => assert!(!u.is_snapshot),
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_deribit_subscribe_ack_returns_empty() {
+        let adapter = make_deribit_adapter();
+        let msg = r#"{"jsonrpc":"2.0","id":42,"result":["trades.BTC-PERPETUAL.raw"]}"#;
         let events = adapter.parse_message(msg).expect("parse ok");
         assert!(events.is_empty());
     }
