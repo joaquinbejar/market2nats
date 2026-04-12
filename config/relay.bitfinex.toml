@@ -1,0 +1,206 @@
+#
+# market2nats — Bitfinex v2 (spot + derivatives)
+#
+# Parser-tweak profile. Bitfinex v2 is unusual on three axes:
+#
+# 1. One subscribe frame per channel per symbol, NOT batched:
+#      {"event":"subscribe","channel":"trades","symbol":"tBTCUSD"}
+#
+# 2. The server replies with a numeric `chanId` and thereafter all data
+#    messages are flat JSON arrays keyed by that chanId:
+#      [17470, [...trade data...]]
+#    So the parser must maintain a chanId → (instrument, data_type) map.
+#
+# 3. Data payloads are positional JSON arrays, not objects. The index of
+#    each field depends on the channel.
+#
+# Endpoints:
+#   - Public   : wss://api-pub.bitfinex.com/ws/2
+#
+# Supported canonical data types on Bitfinex v2 public:
+#   trade          → trades     (channel "trades")
+#   ticker         → ticker
+#   l2_orderbook   → book       (precision P0/P1/P2/P3, default P0)
+#   funding_rate   → status     (derivatives, status:deriv)
+#   liquidation    → status     (derivatives, status:liq:global)
+#
+# Bitfinex denotes derivatives with a leading "t" prefix, same as spot:
+#   tBTCUSD       → spot
+#   tBTCF0:USTF0  → linear perp BTC/USDt
+#   tETHF0:USTF0  → linear perp ETH/USDt
+#
+# Config uses spot for BTC/USD and ETH/USD, plus derivatives for funding
+# and liquidation coverage.
+#
+# NATS subjects produced:
+#   market.bitfinex.btc-usd.trade|ticker|l2_orderbook
+#   market.bitfinex.eth-usd.trade|ticker|l2_orderbook
+#   market.bitfinex-deriv.btc-ustf0.funding_rate
+#   market.bitfinex-deriv.eth-ustf0.funding_rate
+#   market.bitfinex-deriv.liq-global.liquidation
+
+[service]
+name = "market2nats-bitfinex"
+log_level = "info"
+log_format = "json"
+shutdown_timeout_ms = 5000
+
+[serialization]
+format = "json"
+
+[nats]
+urls = ["nats://localhost:4222"]
+connect_timeout_ms = 5000
+reconnect_buffer_size = 8388608
+max_reconnects = -1
+ping_interval_secs = 20
+auth = "userpass"
+username = "${NATS_USER}"
+password = "${NATS_PASSWORD}"
+
+[nats.tls]
+enabled = false
+
+# ── Streams ──────────────────────────────────
+
+[[nats.streams]]
+name = "MARKET_TRADES"
+subjects = ["market.bitfinex.*.trade"]
+storage = "file"
+retention = "limits"
+max_age_secs = 86400
+max_bytes = 1073741824
+max_msg_size = 65536
+discard = "old"
+num_replicas = 1
+duplicate_window_secs = 120
+
+[[nats.streams]]
+name = "MARKET_TICKER_BITFINEX"
+subjects = ["market.bitfinex.*.ticker"]
+storage = "memory"
+retention = "limits"
+max_age_secs = 300
+num_replicas = 1
+
+[[nats.streams]]
+name = "MARKET_ORDERBOOK_BITFINEX"
+subjects = ["market.bitfinex.*.l2_orderbook"]
+storage = "file"
+retention = "limits"
+max_age_secs = 3600
+max_bytes = 5368709120
+num_replicas = 1
+
+[[nats.streams]]
+name = "MARKET_FUNDING_BITFINEX"
+subjects = ["market.bitfinex-deriv.*.funding_rate"]
+storage = "file"
+retention = "limits"
+max_age_secs = 604800
+num_replicas = 1
+
+[[nats.streams]]
+name = "MARKET_LIQUIDATIONS_BITFINEX"
+subjects = ["market.bitfinex-deriv.*.liquidation"]
+storage = "file"
+retention = "interest"
+max_age_secs = 86400
+num_replicas = 1
+
+# ── Bitfinex Spot ────────────────────────────
+
+[[venues]]
+id = "bitfinex"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://api-pub.bitfinex.com/ws/2"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 25
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+# Target shape: one frame per (channel, instrument), with "channel" and
+# "symbol" at top level. Generic_ws currently only does ${channel}/${instrument}
+# substitution inside a string template. This works for the outgoing
+# subscribe — the tweak is entirely in the INCOMING parser path for the
+# chanId → (instrument, data_type) mapping.
+subscribe_template = '{"event":"subscribe","channel":"${channel}","symbol":"${instrument}"}'
+stream_format = "${channel}:${instrument}"
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "trades"
+ticker = "ticker"
+l2_orderbook = "book"
+
+[[venues.subscriptions]]
+instrument = "tBTCUSD"
+canonical_symbol = "BTC/USD"
+data_types = ["trade", "ticker", "l2_orderbook"]
+
+[[venues.subscriptions]]
+instrument = "tETHUSD"
+canonical_symbol = "ETH/USD"
+data_types = ["trade", "ticker", "l2_orderbook"]
+
+# ── Bitfinex Derivatives ─────────────────────
+
+[[venues]]
+id = "bitfinex-deriv"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://api-pub.bitfinex.com/ws/2"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 25
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+# Funding and liquidation live on the "status" channel, with a key
+# argument distinguishing sub-streams:
+#   {"event":"subscribe","channel":"status","key":"deriv:tBTCF0:USTF0"}
+#   {"event":"subscribe","channel":"status","key":"liq:global"}
+# This fits `subscribe_template` with a pseudo-channel "status" and
+# ${instrument} carrying the full key.
+subscribe_template = '{"event":"subscribe","channel":"status","key":"${instrument}"}'
+stream_format = "status:${instrument}"
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+# Both funding_rate and liquidation map to the same wire channel
+# ("status"); the parser branch uses the key prefix to route.
+funding_rate = "status"
+liquidation = "status"
+
+[[venues.subscriptions]]
+instrument = "deriv:tBTCF0:USTF0"
+canonical_symbol = "BTC/USTF0"
+data_types = ["funding_rate"]
+
+[[venues.subscriptions]]
+instrument = "deriv:tETHF0:USTF0"
+canonical_symbol = "ETH/USTF0"
+data_types = ["funding_rate"]
+
+[[venues.subscriptions]]
+instrument = "liq:global"
+canonical_symbol = "LIQ/GLOBAL"
+data_types = ["liquidation"]

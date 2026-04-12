@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use dashmap::DashMap;
+
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use tokio::net::TcpStream;
@@ -19,6 +21,17 @@ use super::circuit_breaker::CircuitBreaker;
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+/// Bitfinex routes data messages by an integer `chanId` assigned in the
+/// `subscribed` ack. The adapter records the mapping for every successful
+/// subscribe so subsequent positional payloads can be routed back to a
+/// canonical (instrument, data_type).
+#[derive(Debug, Clone)]
+struct BitfinexChannel {
+    instrument: String,
+    canonical: String,
+    data_type: MarketDataType,
+}
+
 /// A generic WebSocket adapter configurable entirely via TOML.
 ///
 /// Uses template-based subscribe messages and a channel map to translate
@@ -33,6 +46,10 @@ pub struct GenericWsAdapter {
     instrument_map: HashMap<String, String>,
     /// Reverse channel map: venue channel name → MarketDataType.
     reverse_channel_map: HashMap<String, MarketDataType>,
+    /// Bitfinex-only: chanId → (instrument, canonical, data_type) routing
+    /// table populated from `subscribed` events. Uses interior mutability so
+    /// `parse_message(&self, ...)` can update it on incoming acks.
+    bitfinex_channels: DashMap<u64, BitfinexChannel>,
 }
 
 impl GenericWsAdapter {
@@ -101,6 +118,7 @@ impl GenericWsAdapter {
             ws: None,
             instrument_map: HashMap::new(),
             reverse_channel_map,
+            bitfinex_channels: DashMap::new(),
         })
     }
 
@@ -221,6 +239,7 @@ impl GenericWsAdapter {
             "coinbase" => return self.parse_coinbase_envelope(&value),
             "deribit" => return self.parse_deribit_envelope(&value),
             "dydx" => return self.parse_dydx_envelope(&value),
+            "bitfinex" | "bitfinex-deriv" => return self.parse_bitfinex_envelope(&value),
             _ => {}
         }
 
@@ -3751,6 +3770,347 @@ impl GenericWsAdapter {
         let canonical_symbol = CanonicalSymbol::try_new(&canonical).ok()?;
         Some((instrument_id, canonical_symbol))
     }
+
+    // ── Bitfinex ────────────────────────────────────────────────────────
+    //
+    // Bitfinex assigns an integer `chanId` on each successful subscribe ack.
+    // Subsequent data frames are positional JSON arrays keyed by that chanId:
+    //   [chanId, [...]]             — snapshot or single payload
+    //   [chanId, "tu"|"te", [...]]  — trade update / execution
+    //   [chanId, "hb"]              — heartbeat (ignored)
+    //
+    // Supported channels: `trades` (Trade), `ticker` (Ticker), `book` (L2Update).
+    fn parse_bitfinex_envelope(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        // Control event branch.
+        if let Some(event) = value.get("event").and_then(|v| v.as_str()) {
+            if event == "subscribed" {
+                self.register_bitfinex_subscription(value);
+            } else if event == "error" {
+                let msg = value
+                    .get("msg")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let code = value.get("code").and_then(|v| v.as_u64()).unwrap_or(0);
+                warn!(venue = %self.venue_id, error = %msg, code = code, "bitfinex error event");
+            }
+            return Ok(Vec::new());
+        }
+
+        // Data frame branch -- must be a JSON array starting with chanId.
+        let arr = match value.as_array() {
+            Some(a) if !a.is_empty() => a,
+            _ => return Ok(Vec::new()),
+        };
+        let chan_id = match arr.first().and_then(|v| v.as_u64()) {
+            Some(id) => id,
+            None => return Ok(Vec::new()),
+        };
+        // Heartbeats: [chanId, "hb"]
+        if arr.get(1).and_then(|v| v.as_str()) == Some("hb") {
+            return Ok(Vec::new());
+        }
+
+        let route = match self.bitfinex_channels.get(&chan_id) {
+            Some(r) => r.clone(),
+            None => return Ok(Vec::new()),
+        };
+        let instrument =
+            InstrumentId::try_new(&route.instrument).map_err(|e| VenueError::ReceiveFailed {
+                venue: self.venue_id.as_str().to_owned(),
+                reason: e.to_string(),
+            })?;
+        let canonical_symbol =
+            CanonicalSymbol::try_new(&route.canonical).map_err(|e| VenueError::ReceiveFailed {
+                venue: self.venue_id.as_str().to_owned(),
+                reason: e.to_string(),
+            })?;
+
+        match route.data_type {
+            MarketDataType::Trade => self.build_bitfinex_trades(arr, instrument, canonical_symbol),
+            MarketDataType::Ticker => self.build_bitfinex_ticker(arr, instrument, canonical_symbol),
+            MarketDataType::L2Orderbook => {
+                self.build_bitfinex_book(arr, instrument, canonical_symbol)
+            }
+            MarketDataType::FundingRate | MarketDataType::Liquidation => Ok(Vec::new()),
+        }
+    }
+
+    fn register_bitfinex_subscription(&self, value: &serde_json::Value) {
+        let chan_id = match value.get("chanId").and_then(|v| v.as_u64()) {
+            Some(id) => id,
+            None => return,
+        };
+        let channel = value.get("channel").and_then(|v| v.as_str()).unwrap_or("");
+        let symbol = match value
+            .get("symbol")
+            .and_then(|v| v.as_str())
+            .or_else(|| value.get("key").and_then(|v| v.as_str()))
+        {
+            Some(s) => s,
+            None => return,
+        };
+        let canonical = match self.lookup_canonical(symbol) {
+            Some(c) => c,
+            None => return,
+        };
+        let data_type = match channel {
+            "trades" => MarketDataType::Trade,
+            "ticker" => MarketDataType::Ticker,
+            "book" => MarketDataType::L2Orderbook,
+            "status" if symbol.starts_with("deriv:") => MarketDataType::FundingRate,
+            "status" if symbol.starts_with("liq:") => MarketDataType::Liquidation,
+            _ => return,
+        };
+        self.bitfinex_channels.insert(
+            chan_id,
+            BitfinexChannel {
+                instrument: symbol.to_owned(),
+                canonical,
+                data_type,
+            },
+        );
+    }
+
+    fn build_bitfinex_trades(
+        &self,
+        arr: &[serde_json::Value],
+        instrument: InstrumentId,
+        canonical: CanonicalSymbol,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        // Two shapes:
+        //   [chanId, [[id, mts, amount, price], ...]]   (snapshot)
+        //   [chanId, "tu"|"te", [id, mts, amount, price]] (single update)
+        let payload = if let Some(s) = arr.get(1).and_then(|v| v.as_str())
+            && (s == "tu" || s == "te")
+        {
+            arr.get(2)
+        } else {
+            arr.get(1)
+        };
+        let payload = match payload {
+            Some(p) => p,
+            None => return Ok(Vec::new()),
+        };
+
+        let trades_iter: Vec<&serde_json::Value> = if let Some(outer) = payload.as_array() {
+            // Snapshot: array of trade arrays. Single update: a flat array of fields.
+            // Distinguish by inspecting the first element -- a snapshot's items are
+            // arrays themselves; a single update's items are scalars.
+            if outer.first().map(|v| v.is_array()).unwrap_or(false) {
+                outer.iter().collect()
+            } else {
+                vec![payload]
+            }
+        } else {
+            return Ok(Vec::new());
+        };
+
+        let mut events = Vec::with_capacity(trades_iter.len());
+        for trade in trades_iter {
+            let inner = match trade.as_array().filter(|a| a.len() >= 4) {
+                Some(a) => a,
+                None => continue,
+            };
+            let trade_id = inner.first().and_then(|v| {
+                if let Some(s) = v.as_str() {
+                    Some(s.to_owned())
+                } else {
+                    v.as_u64().map(|n| n.to_string())
+                }
+            });
+            let exchange_ts = inner.get(1).and_then(|v| v.as_u64()).map(Timestamp::new);
+            let amount_dec = match inner
+                .get(2)
+                .and_then(|v| v.as_f64())
+                .and_then(|f| Decimal::try_from(f).ok())
+            {
+                Some(d) => d,
+                None => continue,
+            };
+            let side = if amount_dec.is_sign_negative() {
+                Side::Sell
+            } else {
+                Side::Buy
+            };
+            let quantity = match Quantity::try_new(amount_dec.abs()) {
+                Ok(q) => q,
+                Err(_) => continue,
+            };
+            let price = match inner
+                .get(3)
+                .and_then(|v| v.as_f64())
+                .and_then(|f| Decimal::try_from(f).ok())
+                .and_then(|d| Price::try_new(d).ok())
+            {
+                Some(p) => p,
+                None => continue,
+            };
+            events.push(MarketDataEnvelope {
+                venue: self.venue_id.clone(),
+                instrument: instrument.clone(),
+                canonical_symbol: canonical.clone(),
+                data_type: MarketDataType::Trade,
+                received_at: Timestamp::now(),
+                exchange_timestamp: exchange_ts,
+                sequence: Sequence::new(0),
+                payload: MarketDataPayload::Trade(Trade {
+                    price,
+                    quantity,
+                    side,
+                    trade_id,
+                }),
+            });
+        }
+        Ok(events)
+    }
+
+    fn build_bitfinex_ticker(
+        &self,
+        arr: &[serde_json::Value],
+        instrument: InstrumentId,
+        canonical: CanonicalSymbol,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        // [chanId, [bid, bid_size, ask, ask_size, daily_change, daily_change_rel, last_price, volume, high, low]]
+        let payload = match arr.get(1).and_then(|v| v.as_array()) {
+            Some(a) if a.len() >= 10 => a,
+            _ => return Ok(Vec::new()),
+        };
+        let parse_dec = |idx: usize| -> Option<Decimal> {
+            payload
+                .get(idx)
+                .and_then(|v| v.as_f64())
+                .and_then(|f| Decimal::try_from(f).ok())
+        };
+        let bid_price = match parse_dec(0).and_then(|d| Price::try_new(d).ok()) {
+            Some(p) => p,
+            None => return Ok(Vec::new()),
+        };
+        let bid_qty = match parse_dec(1).and_then(|d| Quantity::try_new(d).ok()) {
+            Some(q) => q,
+            None => return Ok(Vec::new()),
+        };
+        let ask_price = match parse_dec(2).and_then(|d| Price::try_new(d).ok()) {
+            Some(p) => p,
+            None => return Ok(Vec::new()),
+        };
+        let ask_qty = match parse_dec(3).and_then(|d| Quantity::try_new(d).ok()) {
+            Some(q) => q,
+            None => return Ok(Vec::new()),
+        };
+        let last_price = match parse_dec(6).and_then(|d| Price::try_new(d).ok()) {
+            Some(p) => p,
+            None => return Ok(Vec::new()),
+        };
+        Ok(vec![MarketDataEnvelope {
+            venue: self.venue_id.clone(),
+            instrument,
+            canonical_symbol: canonical,
+            data_type: MarketDataType::Ticker,
+            received_at: Timestamp::now(),
+            exchange_timestamp: None,
+            sequence: Sequence::new(0),
+            payload: MarketDataPayload::Ticker(Ticker {
+                bid_price,
+                bid_qty,
+                ask_price,
+                ask_qty,
+                last_price,
+            }),
+        }])
+    }
+
+    fn build_bitfinex_book(
+        &self,
+        arr: &[serde_json::Value],
+        instrument: InstrumentId,
+        canonical: CanonicalSymbol,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        // Two shapes:
+        //   [chanId, [[price, count, amount], ...]]  (snapshot, full book)
+        //   [chanId, [price, count, amount]]         (single-level update)
+        let payload = match arr.get(1).and_then(|v| v.as_array()) {
+            Some(a) => a,
+            None => return Ok(Vec::new()),
+        };
+
+        let levels_raw: Vec<&serde_json::Value> =
+            if payload.first().map(|v| v.is_array()).unwrap_or(false) {
+                payload.iter().collect()
+            } else {
+                // Single delta level -- wrap as a one-element list and reuse the loop.
+                vec![arr.get(1).unwrap_or(&serde_json::Value::Null)]
+            };
+        // Snapshot: the payload contains an array of level arrays.
+        // Single-level update: the payload is a flat [price, count, amount].
+        // We detect snapshot by whether the first element is itself an array.
+        let is_snapshot = payload.first().map(|v| v.is_array()).unwrap_or(false);
+
+        let mut bids = Vec::new();
+        let mut asks = Vec::new();
+        for lvl in levels_raw {
+            let inner = match lvl.as_array().filter(|a| a.len() >= 3) {
+                Some(a) => a,
+                None => continue,
+            };
+            let price = match inner
+                .first()
+                .and_then(|v| v.as_f64())
+                .and_then(|f| Decimal::try_from(f).ok())
+                .and_then(|d| Price::try_new(d).ok())
+            {
+                Some(p) => p,
+                None => continue,
+            };
+            // count is index 1; when count==0 the level should be removed
+            // (emit Quantity 0). Amount is index 2 with sign indicating side.
+            let count = inner.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
+            let amount = match inner
+                .get(2)
+                .and_then(|v| v.as_f64())
+                .and_then(|f| Decimal::try_from(f).ok())
+            {
+                Some(d) => d,
+                None => continue,
+            };
+            let qty = if count == 0 {
+                // Level removal -- emit zero quantity per the domain contract.
+                match Quantity::try_new(Decimal::ZERO) {
+                    Ok(q) => q,
+                    Err(_) => continue,
+                }
+            } else {
+                match Quantity::try_new(amount.abs()) {
+                    Ok(q) => q,
+                    Err(_) => continue,
+                }
+            };
+            if amount.is_sign_negative() {
+                asks.push((price, qty));
+            } else {
+                bids.push((price, qty));
+            }
+        }
+        if bids.is_empty() && asks.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![MarketDataEnvelope {
+            venue: self.venue_id.clone(),
+            instrument,
+            canonical_symbol: canonical,
+            data_type: MarketDataType::L2Orderbook,
+            received_at: Timestamp::now(),
+            exchange_timestamp: None,
+            sequence: Sequence::new(0),
+            payload: MarketDataPayload::L2Update(L2Update {
+                bids,
+                asks,
+                is_snapshot,
+            }),
+        }])
+    }
 }
 
 impl VenueAdapter for GenericWsAdapter {
@@ -6216,5 +6576,161 @@ mod tests {
             let events = adapter.parse_message(msg).expect("parse ok");
             assert!(events.is_empty(), "control message produced events: {msg}");
         }
+    }
+
+    // ── Bitfinex ────────────────────────────────────────────────────────
+
+    fn make_bitfinex_adapter() -> GenericWsAdapter {
+        let conn = ConnectionConfig {
+            ws_url: "wss://example.invalid/ws".to_owned(),
+            reconnect_delay_ms: 1000,
+            max_reconnect_delay_ms: 60000,
+            max_reconnect_attempts: 0,
+            ping_interval_secs: 25,
+            pong_timeout_secs: 10,
+        };
+        let mut cm = HashMap::new();
+        cm.insert("trade".to_owned(), "trades".to_owned());
+        cm.insert("ticker".to_owned(), "ticker".to_owned());
+        cm.insert("l2_orderbook".to_owned(), "book".to_owned());
+        let ws_cfg = GenericWsConfig {
+            subscribe_template: None,
+            batch_subscribe_template: None,
+            stream_format: "${channel}".to_owned(),
+            channel_map: cm,
+            message_format: "json".to_owned(),
+        };
+        let mut adapter = GenericWsAdapter::new("bitfinex", conn, ws_cfg, None)
+            .expect("adapter creation succeeds");
+        adapter
+            .instrument_map
+            .insert("tBTCUSD".to_owned(), "BTC/USD".to_owned());
+        adapter
+            .instrument_map
+            .insert("tETHUSD".to_owned(), "ETH/USD".to_owned());
+        adapter
+    }
+
+    fn subscribe_bitfinex(adapter: &GenericWsAdapter, channel: &str, chan_id: u64, symbol: &str) {
+        let msg = serde_json::json!({
+            "event": "subscribed",
+            "channel": channel,
+            "chanId": chan_id,
+            "symbol": symbol,
+            "pair": symbol.trim_start_matches('t'),
+        });
+        let events = adapter.parse_message(&msg.to_string()).expect("parse ok");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_bitfinex_subscribed_registers_chan_id() {
+        let adapter = make_bitfinex_adapter();
+        subscribe_bitfinex(&adapter, "trades", 17470, "tBTCUSD");
+        let registered = adapter.bitfinex_channels.get(&17470);
+        assert!(registered.is_some());
+        let route = registered.unwrap();
+        assert_eq!(route.data_type, MarketDataType::Trade);
+        assert_eq!(route.canonical, "BTC/USD");
+    }
+
+    #[test]
+    fn test_bitfinex_heartbeat_ignored() {
+        let adapter = make_bitfinex_adapter();
+        subscribe_bitfinex(&adapter, "trades", 17470, "tBTCUSD");
+        let events = adapter.parse_message(r#"[17470,"hb"]"#).expect("parse ok");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_bitfinex_trade_snapshot_yields_trades() {
+        let adapter = make_bitfinex_adapter();
+        subscribe_bitfinex(&adapter, "trades", 17470, "tBTCUSD");
+        // Snapshot is a single payload that contains an array of trades.
+        let msg = r#"[17470,[
+            [539206467, 1700000000000, 0.001, 42000.5],
+            [539206466, 1699999999500, -0.002, 42000.0]
+        ]]"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 2);
+        match &events[0].payload {
+            MarketDataPayload::Trade(t) => assert_eq!(t.side, Side::Buy),
+            other => panic!("expected Trade, got {other:?}"),
+        }
+        match &events[1].payload {
+            MarketDataPayload::Trade(t) => assert_eq!(t.side, Side::Sell),
+            other => panic!("expected Trade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bitfinex_trade_update_yields_single_trade() {
+        let adapter = make_bitfinex_adapter();
+        subscribe_bitfinex(&adapter, "trades", 17470, "tBTCUSD");
+        let msg = r#"[17470,"tu",[539206468, 1700000000123, -0.0005, 42000.6]]"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::Trade(t) => assert_eq!(t.side, Side::Sell),
+            other => panic!("expected Trade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bitfinex_ticker_yields_ticker() {
+        let adapter = make_bitfinex_adapter();
+        subscribe_bitfinex(&adapter, "ticker", 11534, "tBTCUSD");
+        let msg = r#"[11534,[42000.3, 1.5, 42000.7, 2.0, 500.0, 0.0125, 42000.5, 1234.56, 42500.0, 41500.0]]"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::Ticker(_) => {}
+            other => panic!("expected Ticker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bitfinex_book_snapshot_splits_by_amount_sign() {
+        let adapter = make_bitfinex_adapter();
+        subscribe_bitfinex(&adapter, "book", 92105, "tBTCUSD");
+        // [chanId, [[price, count, amount], ...]] -- positive amount = bid, negative = ask.
+        let msg = r#"[92105,[[42000.0, 3, 0.5], [41999.0, 2, 1.5], [42001.0, 2, -0.3], [42002.0, 1, -0.4]]]"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => {
+                assert!(u.is_snapshot);
+                assert_eq!(u.bids.len(), 2);
+                assert_eq!(u.asks.len(), 2);
+            }
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bitfinex_book_single_level_update() {
+        let adapter = make_bitfinex_adapter();
+        subscribe_bitfinex(&adapter, "book", 92105, "tBTCUSD");
+        let msg = r#"[92105,[42000.0, 3, 0.5]]"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => {
+                assert!(!u.is_snapshot);
+                assert_eq!(u.bids.len(), 1);
+                assert!(u.asks.is_empty());
+            }
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bitfinex_unregistered_chan_id_returns_empty() {
+        let adapter = make_bitfinex_adapter();
+        // No subscribe -- chan 99999 unknown.
+        let events = adapter
+            .parse_message(r#"[99999, [539206467, 1700000000000, 0.001, 42000.5]]"#)
+            .expect("parse ok");
+        assert!(events.is_empty());
     }
 }
