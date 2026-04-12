@@ -1406,10 +1406,13 @@ name = "oracle"
 version = "0.1.0"
 dependencies = [
  "async-nats",
+ "axum",
  "bytes",
  "dashmap",
  "futures-util",
  "market2nats-domain",
+ "metrics",
+ "metrics-exporter-prometheus",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
@@ -1418,6 +1421,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
