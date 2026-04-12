@@ -1,0 +1,115 @@
+#
+# market2nats — Bitstamp (spot)
+#
+# Drop-in profile. Bitstamp does NOT batch subscribe — it expects one
+# subscribe frame per channel. The generic_ws adapter supports this via
+# the non-batch subscribe_template path (one message per instrument/channel
+# pair). Channel names embed the instrument, so stream_format expands to
+# `{channel}_{instrument}`.
+#
+# Endpoint: wss://ws.bitstamp.net
+#
+# Subscribe shape (one frame per channel):
+#   {"event":"bts:subscribe","data":{"channel":"live_trades_btcusdt"}}
+#
+# Supported canonical data types on Bitstamp public WS:
+#   trade         → live_trades
+#   ticker        → (not available on v2; use REST polling or
+#                    synthesize from order_book top levels — out of scope)
+#   l2_orderbook  → order_book (top 100, snapshot every ~1s)
+#                   or diff_order_book for full-depth diffs
+#
+# Bitstamp is spot only; no funding / liquidation channels.
+#
+# NATS subjects produced:
+#   market.bitstamp.btc-usdt.trade
+#   market.bitstamp.btc-usdt.l2_orderbook
+#   market.bitstamp.eth-usdt.trade
+#   market.bitstamp.eth-usdt.l2_orderbook
+
+[service]
+name = "market2nats-bitstamp"
+log_level = "info"
+log_format = "json"
+shutdown_timeout_ms = 5000
+
+[serialization]
+format = "json"
+
+[nats]
+urls = ["nats://localhost:4222"]
+connect_timeout_ms = 5000
+reconnect_buffer_size = 8388608
+max_reconnects = -1
+ping_interval_secs = 20
+auth = "userpass"
+username = "${NATS_USER}"
+password = "${NATS_PASSWORD}"
+
+[nats.tls]
+enabled = false
+
+# ── Streams ──────────────────────────────────
+
+[[nats.streams]]
+name = "MARKET_TRADES"
+subjects = ["market.bitstamp.*.trade"]
+storage = "file"
+retention = "limits"
+max_age_secs = 86400
+max_bytes = 1073741824
+max_msg_size = 65536
+discard = "old"
+num_replicas = 1
+duplicate_window_secs = 120
+
+[[nats.streams]]
+name = "MARKET_ORDERBOOK_BITSTAMP"
+subjects = ["market.bitstamp.*.l2_orderbook"]
+storage = "file"
+retention = "limits"
+max_age_secs = 3600
+max_bytes = 5368709120
+num_replicas = 1
+
+# ── Bitstamp ─────────────────────────────────
+
+[[venues]]
+id = "bitstamp"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://ws.bitstamp.net"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 30
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+# One subscribe frame per channel (non-batch). Bitstamp rejects any extra
+# fields in "data" beyond "channel", so the template is minimal.
+subscribe_template = '{"event":"bts:subscribe","data":{"channel":"${channel}_${instrument}"}}'
+stream_format = "${channel}_${instrument}"
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "live_trades"
+# diff_order_book gives incremental updates; order_book gives top-100 snapshots.
+l2_orderbook = "diff_order_book"
+
+[[venues.subscriptions]]
+instrument = "btcusdt"
+canonical_symbol = "BTC/USDT"
+data_types = ["trade", "l2_orderbook"]
+
+[[venues.subscriptions]]
+instrument = "ethusdt"
+canonical_symbol = "ETH/USDT"
+data_types = ["trade", "l2_orderbook"]
