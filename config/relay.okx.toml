@@ -118,11 +118,8 @@ reset_timeout_secs = 60
 half_open_max_requests = 2
 
 [venues.generic_ws]
-# Target shape once the object-args parser tweak lands:
-#   batch_subscribe_template = '{"op":"subscribe","args":${params}}'
-#   args_format = "object"
-#   stream_format = '{"channel":"${channel}","instId":"${instrument}"}'
 batch_subscribe_template = '{"op":"subscribe","args":${params}}'
+args_format = "object"
 stream_format = '{"channel":"${channel}","instId":"${instrument}"}'
 message_format = "json"
 
@@ -163,6 +160,7 @@ half_open_max_requests = 2
 
 [venues.generic_ws]
 batch_subscribe_template = '{"op":"subscribe","args":${params}}'
+args_format = "object"
 stream_format = '{"channel":"${channel}","instId":"${instrument}"}'
 message_format = "json"
 
