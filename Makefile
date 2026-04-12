@@ -124,6 +124,10 @@ run-gate:
 run-okx:
 	cargo run --release -- config/relay.okx.toml
 
+.PHONY: run-coinbase
+run-coinbase:
+	cargo run --release -- config/relay.coinbase.toml
+
 
 .PHONY: fix
 fix:
