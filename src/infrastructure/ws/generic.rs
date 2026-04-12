@@ -220,6 +220,7 @@ impl GenericWsAdapter {
             "okx" | "okx-swap" => return self.parse_okx_envelope(&value),
             "coinbase" => return self.parse_coinbase_envelope(&value),
             "deribit" => return self.parse_deribit_envelope(&value),
+            "dydx" => return self.parse_dydx_envelope(&value),
             _ => {}
         }
 
@@ -3573,6 +3574,183 @@ impl GenericWsAdapter {
             }),
         }))
     }
+
+    // ── dYdX v4 ─────────────────────────────────────────────────────────
+    //
+    // dYdX v4 WS sends top-level messages with `type` and `channel`:
+    //   type: "connected" | "subscribed" | "channel_data" | "channel_batch_data" | "unsubscribed" | "error"
+    //   channel: "v4_trades" | "v4_orderbook" | "v4_markets"
+    //
+    // "subscribed" carries the initial snapshot; "channel_data" / "channel_batch_data" are deltas.
+    // Trades carry a `liquidation: bool` flag for liquidation tap.
+    // v4_markets is a global channel that fans out per-market funding rates.
+    fn parse_dydx_envelope(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if matches!(msg_type, "connected" | "unsubscribed" | "error") {
+            return Ok(Vec::new());
+        }
+        if !matches!(
+            msg_type,
+            "subscribed" | "channel_data" | "channel_batch_data"
+        ) {
+            return Ok(Vec::new());
+        }
+
+        let channel = value.get("channel").and_then(|v| v.as_str()).unwrap_or("");
+        let contents = match value.get("contents") {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+        let is_snapshot = msg_type == "subscribed";
+
+        match channel {
+            "v4_trades" => {
+                let id = value.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let (instrument, canonical) = match self.resolve_dydx_instrument(id) {
+                    Some(x) => x,
+                    None => return Ok(Vec::new()),
+                };
+                let trades = match contents.get("trades").and_then(|v| v.as_array()) {
+                    Some(t) => t,
+                    None => return Ok(Vec::new()),
+                };
+                let mut events = Vec::with_capacity(trades.len());
+                for item in trades {
+                    let price = match extract_decimal(item, &["price"])
+                        .and_then(|d| Price::try_new(d).ok())
+                    {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let quantity = match extract_decimal(item, &["size"])
+                        .and_then(|d| Quantity::try_new(d).ok())
+                    {
+                        Some(q) => q,
+                        None => continue,
+                    };
+                    let side = item
+                        .get("side")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| Side::from_str_loose(s).ok())
+                        .unwrap_or(Side::Buy);
+                    let trade_id = item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_owned());
+                    let is_liquidation = item
+                        .get("liquidation")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    events.push(MarketDataEnvelope {
+                        venue: self.venue_id.clone(),
+                        instrument: instrument.clone(),
+                        canonical_symbol: canonical.clone(),
+                        data_type: MarketDataType::Trade,
+                        received_at: Timestamp::now(),
+                        exchange_timestamp: None,
+                        sequence: Sequence::new(0),
+                        payload: MarketDataPayload::Trade(Trade {
+                            price,
+                            quantity,
+                            side,
+                            trade_id: trade_id.clone(),
+                        }),
+                    });
+                    // Liquidation tap.
+                    if is_liquidation {
+                        events.push(MarketDataEnvelope {
+                            venue: self.venue_id.clone(),
+                            instrument: instrument.clone(),
+                            canonical_symbol: canonical.clone(),
+                            data_type: MarketDataType::Liquidation,
+                            received_at: Timestamp::now(),
+                            exchange_timestamp: None,
+                            sequence: Sequence::new(0),
+                            payload: MarketDataPayload::Liquidation(Liquidation {
+                                side,
+                                price,
+                                quantity,
+                            }),
+                        });
+                    }
+                }
+                Ok(events)
+            }
+            "v4_orderbook" => {
+                let id = value.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let (instrument, canonical) = match self.resolve_dydx_instrument(id) {
+                    Some(x) => x,
+                    None => return Ok(Vec::new()),
+                };
+                let bids = parse_dydx_levels(contents.get("bids"));
+                let asks = parse_dydx_levels(contents.get("asks"));
+                if bids.is_empty() && asks.is_empty() {
+                    return Ok(Vec::new());
+                }
+                Ok(vec![MarketDataEnvelope {
+                    venue: self.venue_id.clone(),
+                    instrument,
+                    canonical_symbol: canonical,
+                    data_type: MarketDataType::L2Orderbook,
+                    received_at: Timestamp::now(),
+                    exchange_timestamp: None,
+                    sequence: Sequence::new(0),
+                    payload: MarketDataPayload::L2Update(L2Update {
+                        bids,
+                        asks,
+                        is_snapshot,
+                    }),
+                }])
+            }
+            "v4_markets" => {
+                // Global feed: fan out funding rates per market in `contents.trading`.
+                let trading = match contents.get("trading").and_then(|v| v.as_object()) {
+                    Some(t) => t,
+                    None => return Ok(Vec::new()),
+                };
+                let mut events = Vec::new();
+                for (symbol, market) in trading {
+                    let (instrument, canonical) = match self.resolve_dydx_instrument(symbol) {
+                        Some(x) => x,
+                        None => continue,
+                    };
+                    let rate = match extract_decimal(market, &["nextFundingRate"]) {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                    events.push(MarketDataEnvelope {
+                        venue: self.venue_id.clone(),
+                        instrument,
+                        canonical_symbol: canonical,
+                        data_type: MarketDataType::FundingRate,
+                        received_at: Timestamp::now(),
+                        exchange_timestamp: None,
+                        sequence: Sequence::new(0),
+                        payload: MarketDataPayload::FundingRate(FundingRate {
+                            rate,
+                            predicted_rate: None,
+                            next_funding_at: Timestamp::new(0),
+                        }),
+                    });
+                }
+                Ok(events)
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn resolve_dydx_instrument(
+        &self,
+        instrument_str: &str,
+    ) -> Option<(InstrumentId, CanonicalSymbol)> {
+        let canonical = self.lookup_canonical(instrument_str)?;
+        let instrument_id = InstrumentId::try_new(instrument_str).ok()?;
+        let canonical_symbol = CanonicalSymbol::try_new(&canonical).ok()?;
+        Some((instrument_id, canonical_symbol))
+    }
 }
 
 impl VenueAdapter for GenericWsAdapter {
@@ -3927,6 +4105,29 @@ fn parse_deribit_book_side(value: Option<&serde_json::Value>) -> Vec<(Price, Qua
             })
             .and_then(|d| Quantity::try_new(d).ok())
         {
+            Some(q) => q,
+            None => continue,
+        };
+        levels.push((price, qty));
+    }
+    levels
+}
+
+/// Parses dYdX v4 order-book levels.
+///
+/// dYdX sends levels as objects: `{"price": "42000.00", "size": "0.5"}`.
+fn parse_dydx_levels(value: Option<&serde_json::Value>) -> Vec<(Price, Quantity)> {
+    let arr = match value.and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    let mut levels = Vec::with_capacity(arr.len());
+    for item in arr {
+        let price = match extract_decimal(item, &["price"]).and_then(|d| Price::try_new(d).ok()) {
+            Some(p) => p,
+            None => continue,
+        };
+        let qty = match extract_decimal(item, &["size"]).and_then(|d| Quantity::try_new(d).ok()) {
             Some(q) => q,
             None => continue,
         };
@@ -5827,5 +6028,193 @@ mod tests {
         let msg = r#"{"jsonrpc":"2.0","id":42,"result":["trades.BTC-PERPETUAL.raw"]}"#;
         let events = adapter.parse_message(msg).expect("parse ok");
         assert!(events.is_empty());
+    }
+
+    // ── dYdX v4 ─────────────────────────────────────────────────────────
+
+    fn make_dydx_adapter() -> GenericWsAdapter {
+        let conn = ConnectionConfig {
+            ws_url: "wss://example.invalid/ws".to_owned(),
+            reconnect_delay_ms: 1000,
+            max_reconnect_delay_ms: 60000,
+            max_reconnect_attempts: 0,
+            ping_interval_secs: 25,
+            pong_timeout_secs: 10,
+        };
+        let mut cm = HashMap::new();
+        cm.insert("trade".to_owned(), "v4_trades".to_owned());
+        cm.insert("l2_orderbook".to_owned(), "v4_orderbook".to_owned());
+        cm.insert("funding_rate".to_owned(), "v4_markets".to_owned());
+        cm.insert("liquidation".to_owned(), "v4_trades".to_owned());
+        let ws_cfg = GenericWsConfig {
+            subscribe_template: None,
+            batch_subscribe_template: None,
+            stream_format: "${channel}".to_owned(),
+            channel_map: cm,
+            message_format: "json".to_owned(),
+        };
+        let mut adapter =
+            GenericWsAdapter::new("dydx", conn, ws_cfg, None).expect("adapter creation succeeds");
+        adapter
+            .instrument_map
+            .insert("BTC-USD".to_owned(), "BTC/USD".to_owned());
+        adapter
+            .instrument_map
+            .insert("ETH-USD".to_owned(), "ETH/USD".to_owned());
+        adapter
+    }
+
+    #[test]
+    fn test_dydx_parse_trade_yields_trade() {
+        let adapter = make_dydx_adapter();
+        let msg = r#"{
+            "type": "channel_data",
+            "channel": "v4_trades",
+            "id": "BTC-USD",
+            "contents": {
+                "trades": [{
+                    "id": "0x1234abcd",
+                    "side": "BUY",
+                    "size": "0.001",
+                    "price": "42000.5",
+                    "createdAt": "2024-01-01T12:00:00.123Z",
+                    "type": "LIMIT",
+                    "liquidation": false
+                }]
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::Trade(t) => {
+                assert_eq!(t.side, Side::Buy);
+                assert_eq!(t.trade_id.as_deref(), Some("0x1234abcd"));
+            }
+            other => panic!("expected Trade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_dydx_parse_trade_with_liquidation_emits_both() {
+        let adapter = make_dydx_adapter();
+        let msg = r#"{
+            "type": "channel_data",
+            "channel": "v4_trades",
+            "id": "BTC-USD",
+            "contents": {
+                "trades": [{
+                    "id": "0xliq",
+                    "side": "SELL",
+                    "size": "0.5",
+                    "price": "41000.0",
+                    "createdAt": "2024-01-01T12:00:01.000Z",
+                    "type": "LIQUIDATED",
+                    "liquidation": true
+                }]
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].data_type, MarketDataType::Trade);
+        assert_eq!(events[1].data_type, MarketDataType::Liquidation);
+    }
+
+    #[test]
+    fn test_dydx_parse_orderbook_subscribed_is_snapshot() {
+        let adapter = make_dydx_adapter();
+        let msg = r#"{
+            "type": "subscribed",
+            "channel": "v4_orderbook",
+            "id": "BTC-USD",
+            "contents": {
+                "bids": [{"price": "42000.00", "size": "0.5"}],
+                "asks": [{"price": "42001.00", "size": "0.3"}]
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => {
+                assert!(u.is_snapshot);
+                assert_eq!(u.bids.len(), 1);
+                assert_eq!(u.asks.len(), 1);
+            }
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_dydx_parse_orderbook_channel_data_is_delta() {
+        let adapter = make_dydx_adapter();
+        let msg = r#"{
+            "type": "channel_data",
+            "channel": "v4_orderbook",
+            "id": "BTC-USD",
+            "contents": {
+                "bids": [{"price": "42000.00", "size": "0.6"}],
+                "asks": []
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => assert!(!u.is_snapshot),
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_dydx_parse_v4_markets_fans_out_funding_rates() {
+        let adapter = make_dydx_adapter();
+        let msg = r#"{
+            "type": "channel_data",
+            "channel": "v4_markets",
+            "contents": {
+                "trading": {
+                    "BTC-USD": {
+                        "clobPairId": "0",
+                        "ticker": "BTC-USD",
+                        "status": "ACTIVE",
+                        "oraclePrice": "42000.20",
+                        "nextFundingRate": "0.0001",
+                        "nextFundingAt": "2024-01-01T16:00:00.000Z"
+                    },
+                    "ETH-USD": {
+                        "clobPairId": "1",
+                        "ticker": "ETH-USD",
+                        "status": "ACTIVE",
+                        "oraclePrice": "2200.0",
+                        "nextFundingRate": "0.00005",
+                        "nextFundingAt": "2024-01-01T16:00:00.000Z"
+                    },
+                    "SOL-USD": {
+                        "clobPairId": "2",
+                        "ticker": "SOL-USD",
+                        "status": "ACTIVE",
+                        "oraclePrice": "100.0",
+                        "nextFundingRate": "0.0002"
+                    }
+                }
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        // Only BTC-USD and ETH-USD are in the instrument map; SOL-USD is filtered.
+        assert_eq!(events.len(), 2);
+        for ev in &events {
+            assert_eq!(ev.data_type, MarketDataType::FundingRate);
+        }
+    }
+
+    #[test]
+    fn test_dydx_control_messages_return_empty() {
+        let adapter = make_dydx_adapter();
+        for msg in [
+            r#"{"type":"connected","connection_id":"abc"}"#,
+            r#"{"type":"unsubscribed","channel":"v4_trades","id":"BTC-USD"}"#,
+            r#"{"type":"error","message":"oops"}"#,
+        ] {
+            let events = adapter.parse_message(msg).expect("parse ok");
+            assert!(events.is_empty(), "control message produced events: {msg}");
+        }
     }
 }
