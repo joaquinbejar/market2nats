@@ -127,21 +127,27 @@ half_open_max_requests = 2
 [venues.generic_ws]
 # JSON-RPC wrapping around the channels array.
 batch_subscribe_template = '{"jsonrpc":"2.0","id":42,"method":"public/subscribe","params":{"channels":${params}}}'
-# Deribit channel names are already dot-joined and fully qualified, but
-# the book channel needs suffix "none.20.100ms" appended. Use
-# stream_format that matches the non-book shape by default; the parser
-# tweak must handle the book suffix via channel_suffix_by_type.
 stream_format = "${channel}.${instrument}"
 message_format = "json"
 
 [venues.generic_ws.channel_map]
 trade = "trades"
 ticker = "ticker"
-# Shipped as "book" — the parser tweak appends ".none.20.100ms" to form
-# the full channel name "book.BTC-PERPETUAL.none.20.100ms".
 l2_orderbook = "book"
 funding_rate = "ticker"
 liquidation = "trades"
+
+# Per-data-type suffixes appended to the rendered stream name.
+# trade → "trades.BTC-PERPETUAL" + ".raw" = "trades.BTC-PERPETUAL.raw"
+# ticker → "ticker.BTC-PERPETUAL" + ".raw" = "ticker.BTC-PERPETUAL.raw"
+# l2_orderbook → "book.BTC-PERPETUAL" + ".none.20.100ms" = "book.BTC-PERPETUAL.none.20.100ms"
+# funding_rate → re-uses ticker channel, so same suffix as ticker
+[venues.generic_ws.channel_suffix]
+trade = ".raw"
+ticker = ".raw"
+l2_orderbook = ".none.20.100ms"
+funding_rate = ".raw"
+liquidation = ".raw"
 
 [[venues.subscriptions]]
 instrument = "BTC-PERPETUAL"

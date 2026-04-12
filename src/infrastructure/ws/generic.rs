@@ -7086,4 +7086,66 @@ mod tests {
         assert_eq!(channels[1].as_str(), Some("ticker"));
         assert_eq!(channels[2].as_str(), Some("level2_batch"));
     }
+
+    #[test]
+    fn test_build_subscribe_channel_suffix_appended() {
+        use crate::application::ports::Subscription;
+
+        let conn = ConnectionConfig {
+            ws_url: "wss://example.invalid/ws".to_owned(),
+            reconnect_delay_ms: 1000,
+            max_reconnect_delay_ms: 60000,
+            max_reconnect_attempts: 0,
+            ping_interval_secs: 30,
+            pong_timeout_secs: 10,
+        };
+        let mut cm = HashMap::new();
+        cm.insert("trade".to_owned(), "trades".to_owned());
+        cm.insert("ticker".to_owned(), "ticker".to_owned());
+        cm.insert("l2_orderbook".to_owned(), "book".to_owned());
+        let mut suffix = HashMap::new();
+        suffix.insert("trade".to_owned(), ".raw".to_owned());
+        suffix.insert("ticker".to_owned(), ".raw".to_owned());
+        suffix.insert("l2_orderbook".to_owned(), ".none.20.100ms".to_owned());
+        let ws_cfg = GenericWsConfig {
+            subscribe_template: None,
+            batch_subscribe_template: Some(
+                r#"{"jsonrpc":"2.0","id":42,"method":"public/subscribe","params":{"channels":${params}}}"#
+                    .to_owned(),
+            ),
+            stream_format: "${channel}.${instrument}".to_owned(),
+            channel_map: cm,
+            message_format: "json".to_owned(),
+            subscribe_mode: "per_pair".to_owned(),
+            args_format: "string".to_owned(),
+            channel_suffix: suffix,
+        };
+        let adapter = GenericWsAdapter::new("deribit", conn, ws_cfg, None)
+            .expect("adapter creation succeeds");
+
+        let subs = vec![Subscription {
+            instrument: "BTC-PERPETUAL".to_owned(),
+            canonical_symbol: "BTC/PERP".to_owned(),
+            data_types: vec![
+                MarketDataType::Trade,
+                MarketDataType::Ticker,
+                MarketDataType::L2Orderbook,
+            ],
+        }];
+
+        let msgs = adapter.build_subscribe_messages(&subs);
+        assert_eq!(msgs.len(), 1);
+
+        let parsed: serde_json::Value = serde_json::from_str(&msgs[0]).expect("valid json");
+        let channels = parsed["params"]["channels"]
+            .as_array()
+            .expect("channels should be array");
+        assert_eq!(channels.len(), 3);
+        assert_eq!(channels[0].as_str(), Some("trades.BTC-PERPETUAL.raw"));
+        assert_eq!(channels[1].as_str(), Some("ticker.BTC-PERPETUAL.raw"));
+        assert_eq!(
+            channels[2].as_str(),
+            Some("book.BTC-PERPETUAL.none.20.100ms")
+        );
+    }
 }
