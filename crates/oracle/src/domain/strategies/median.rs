@@ -63,7 +63,7 @@ pub fn compute_median(sources: &[PriceSource]) -> Result<Price, OracleError> {
     } else {
         // Even: average the two middle elements.
         let left = prices
-            .get(mid.wrapping_sub(1))
+            .get(mid - 1)
             .ok_or_else(|| OracleError::arithmetic_overflow("median left index out of bounds"))?;
         let right = prices
             .get(mid)

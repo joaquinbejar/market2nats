@@ -33,6 +33,13 @@ pub enum OracleError {
         context: String,
     },
 
+    /// An unrecognized aggregation strategy name was provided.
+    #[error("unknown strategy: {name}")]
+    UnknownStrategy {
+        /// The unrecognized strategy name.
+        name: String,
+    },
+
     /// An error propagated from the underlying domain layer.
     #[error("domain error: {0}")]
     Domain(#[from] market2nats_domain::DomainError),
@@ -68,6 +75,14 @@ impl OracleError {
             required,
             available,
         }
+    }
+
+    /// Creates an `UnknownStrategy` error.
+    #[cold]
+    #[inline(never)]
+    #[must_use]
+    pub fn unknown_strategy(name: impl Into<String>) -> Self {
+        Self::UnknownStrategy { name: name.into() }
     }
 
     /// Creates an `AllSourcesStale` error.

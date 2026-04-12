@@ -36,7 +36,7 @@ impl AggregationStrategyKind {
     ///
     /// # Errors
     ///
-    /// Returns `OracleError::Domain` wrapping an `UnknownMarketDataType` if unrecognized.
+    /// Returns `OracleError::UnknownStrategy` if unrecognized.
     #[must_use = "returns a Result that must be handled"]
     pub fn from_str_config(s: &str) -> Result<Self, OracleError> {
         match s {
@@ -44,9 +44,7 @@ impl AggregationStrategyKind {
             "twap" => Ok(Self::Twap),
             "vwap" => Ok(Self::Vwap),
             "median_filtered" => Ok(Self::MedianFiltered),
-            other => Err(OracleError::Domain(
-                market2nats_domain::DomainError::UnknownMarketDataType(other.to_owned()),
-            )),
+            other => Err(OracleError::unknown_strategy(other)),
         }
     }
 }

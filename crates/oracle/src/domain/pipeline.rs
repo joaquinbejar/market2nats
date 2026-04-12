@@ -46,6 +46,9 @@ impl OraclePipeline {
 
     /// Computes an aggregated oracle price from the given sources.
     ///
+    /// This is a pure function: the caller supplies `computed_at` so the domain
+    /// layer never reaches for wall-clock time.
+    ///
     /// 1. Clones sources into a working vector.
     /// 2. Applies each filter in order.
     /// 3. Checks for sufficient surviving sources.
@@ -62,6 +65,7 @@ impl OraclePipeline {
         &self,
         symbol: &CanonicalSymbol,
         sources: &[PriceSource],
+        computed_at: Timestamp,
     ) -> Result<OraclePrice, OracleError> {
         // Apply filters in order.
         let mut filtered: Vec<PriceSource> = sources.to_vec();
@@ -92,7 +96,7 @@ impl OraclePipeline {
         Ok(OraclePrice {
             symbol: symbol.clone(),
             price,
-            timestamp: Timestamp::now(),
+            timestamp: computed_at,
             sources: filtered,
             strategy: self.strategy.kind(),
             confidence,
@@ -104,7 +108,8 @@ impl OraclePipeline {
 ///
 /// spread_bps = (max - min) / min * 10000
 ///
-/// If min is zero, returns zero (all prices are zero).
+/// If all prices are zero, returns zero. If min is zero but max is positive,
+/// returns 10000 bps (100%) as a sentinel for undefined/infinite spread.
 ///
 /// Rounding: `Decimal`'s default (banker's rounding) applies. No additional truncation.
 ///
@@ -130,7 +135,14 @@ fn compute_spread_bps(sources: &[PriceSource]) -> Result<Decimal, OracleError> {
         .unwrap_or(Decimal::ZERO);
 
     if min_price.is_zero() {
-        return Ok(Decimal::ZERO);
+        // If max is also zero, spread is genuinely zero.
+        // If max > 0, the spread is undefined (division by zero); return 10000 bps (100%)
+        // as a sentinel indicating maximum uncertainty.
+        return if max_price.is_zero() {
+            Ok(Decimal::ZERO)
+        } else {
+            Ok(Decimal::from(10000))
+        };
     }
 
     let diff = max_price
@@ -164,7 +176,11 @@ fn compute_spread_bps_from_prices(
     let max_val = max_price.value();
 
     if min_val.is_zero() {
-        return Ok(Decimal::ZERO);
+        return if max_val.is_zero() {
+            Ok(Decimal::ZERO)
+        } else {
+            Ok(Decimal::from(10000))
+        };
     }
 
     let diff = max_val
@@ -217,10 +233,12 @@ mod tests {
             make_source("kraken", dec!(50010), dec!(1), 200),
             make_source("coinbase", dec!(50005), dec!(1), 150),
         ];
-        let result = pipeline.compute(&symbol, &sources).unwrap();
+        let now = Timestamp::new(1_700_000_000_000);
+        let result = pipeline.compute(&symbol, &sources, now).unwrap();
         assert_eq!(result.price.value(), dec!(50005));
         assert_eq!(result.sources.len(), 3);
         assert_eq!(result.symbol.as_str(), "BTC/USDT");
+        assert_eq!(result.timestamp, now);
     }
 
     #[test]
@@ -236,7 +254,8 @@ mod tests {
             make_source("kraken", dec!(50010), dec!(1), 2000),
             make_source("coinbase", dec!(50005), dec!(1), 3000),
         ];
-        let result = pipeline.compute(&symbol, &sources);
+        let now = Timestamp::new(1_700_000_000_000);
+        let result = pipeline.compute(&symbol, &sources, now);
         assert!(result.is_err());
         match result.unwrap_err() {
             OracleError::InsufficientSources {
@@ -262,7 +281,8 @@ mod tests {
             make_source("binance", dec!(3000), dec!(1), 500),
             make_source("kraken", dec!(3010), dec!(1), 600),
         ];
-        let result = pipeline.compute(&symbol, &sources);
+        let now = Timestamp::new(1_700_000_000_000);
+        let result = pipeline.compute(&symbol, &sources, now);
         assert!(result.is_err());
         match result.unwrap_err() {
             OracleError::AllSourcesStale { symbol } => {
@@ -277,7 +297,8 @@ mod tests {
         let pipeline = OraclePipeline::new(Vec::new(), Box::new(MedianStrategy::new()), 1);
         let symbol = CanonicalSymbol::try_new("BTC/USDT").unwrap();
         let sources = vec![make_source("binance", dec!(50000), dec!(1), 100)];
-        let result = pipeline.compute(&symbol, &sources).unwrap();
+        let now = Timestamp::new(1_700_000_000_000);
+        let result = pipeline.compute(&symbol, &sources, now).unwrap();
         assert_eq!(result.price.value(), dec!(50000));
         assert_eq!(result.sources.len(), 1);
     }
@@ -290,7 +311,8 @@ mod tests {
             make_source("a", dec!(100), dec!(1), 0),
             make_source("b", dec!(200), dec!(1), 0),
         ];
-        let result = pipeline.compute(&symbol, &sources).unwrap();
+        let now = Timestamp::new(1_700_000_000_000);
+        let result = pipeline.compute(&symbol, &sources, now).unwrap();
         assert_eq!(result.price.value(), dec!(150));
     }
 
@@ -312,9 +334,17 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_spread_bps_zero_min_returns_zero() {
+    fn test_compute_spread_bps_zero_min_nonzero_max_returns_max_spread() {
         let min = Price::try_new(dec!(0)).unwrap();
         let max = Price::try_new(dec!(100)).unwrap();
+        let bps = compute_spread_bps_from_prices(min, max).unwrap();
+        assert_eq!(bps, dec!(10000));
+    }
+
+    #[test]
+    fn test_compute_spread_bps_both_zero_returns_zero() {
+        let min = Price::try_new(dec!(0)).unwrap();
+        let max = Price::try_new(dec!(0)).unwrap();
         let bps = compute_spread_bps_from_prices(min, max).unwrap();
         assert_eq!(bps, dec!(0));
     }
