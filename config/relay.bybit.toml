@@ -1,0 +1,172 @@
+#
+# market2nats — Bybit (spot + linear USDT perps)
+#
+# Drop-in profile. Bybit v5 public streams use plain JSON framing, batch
+# subscribe via {"op":"subscribe","args":[...]} and dot-joined topic names
+# ("publicTrade.BTCUSDT"), and are supported by the generic_ws adapter via
+# venue-specific parsing/dispatch in generic_ws.
+#
+# Endpoints:
+#   - Spot   : wss://stream.bybit.com/v5/public/spot
+#   - Linear : wss://stream.bybit.com/v5/public/linear  (USDT perps)
+#   - Inverse: wss://stream.bybit.com/v5/public/inverse (not used here)
+#
+# Subscribe shape (both streams):
+#   {"op":"subscribe","args":["publicTrade.BTCUSDT","orderbook.50.BTCUSDT", ...]}
+#
+# NATS subjects produced:
+#   market.bybit.btc-usdt.trade
+#   market.bybit.btc-usdt.ticker
+#   market.bybit.btc-usdt.l2_orderbook
+#   market.bybit-linear.btc-usdt.trade
+#   market.bybit-linear.btc-usdt.ticker
+#   market.bybit-linear.btc-usdt.l2_orderbook
+#   market.bybit-linear.btc-usdt.liquidation
+#   (same for eth-usdt)
+#
+# NOTE on funding rate: Bybit ships fundingRate as a field inside the
+# `tickers` channel for linear contracts — it does NOT have a dedicated
+# funding topic. Extracting it into a `funding_rate` envelope requires
+# a small parser tweak; see the tracking issue for details.
+
+[service]
+name = "market2nats-bybit"
+log_level = "info"
+log_format = "json"
+shutdown_timeout_ms = 5000
+
+[serialization]
+format = "json"
+
+[nats]
+urls = ["nats://localhost:4222"]
+connect_timeout_ms = 5000
+reconnect_buffer_size = 8388608
+max_reconnects = -1
+ping_interval_secs = 20
+auth = "userpass"
+username = "${NATS_USER}"
+password = "${NATS_PASSWORD}"
+
+[nats.tls]
+enabled = false
+
+# ── Streams ──────────────────────────────────
+
+[[nats.streams]]
+name = "MARKET_TRADES"
+subjects = ["market.bybit.*.trade", "market.bybit-linear.*.trade"]
+storage = "file"
+retention = "limits"
+max_age_secs = 86400
+max_bytes = 1073741824
+max_msg_size = 65536
+discard = "old"
+num_replicas = 1
+duplicate_window_secs = 120
+
+[[nats.streams]]
+name = "MARKET_TICKER_BYBIT"
+subjects = ["market.bybit.*.ticker", "market.bybit-linear.*.ticker"]
+storage = "memory"
+retention = "limits"
+max_age_secs = 300
+num_replicas = 1
+
+[[nats.streams]]
+name = "MARKET_ORDERBOOK_BYBIT"
+subjects = ["market.bybit.*.l2_orderbook", "market.bybit-linear.*.l2_orderbook"]
+storage = "file"
+retention = "limits"
+max_age_secs = 3600
+max_bytes = 5368709120
+num_replicas = 1
+
+[[nats.streams]]
+name = "MARKET_LIQUIDATIONS_BYBIT"
+subjects = ["market.bybit-linear.*.liquidation"]
+storage = "file"
+retention = "interest"
+max_age_secs = 86400
+num_replicas = 1
+
+# ── Bybit Spot ───────────────────────────────
+
+[[venues]]
+id = "bybit"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://stream.bybit.com/v5/public/spot"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 20
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+batch_subscribe_template = '{"op":"subscribe","args":${params}}'
+stream_format = "${channel}.${instrument}"
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "publicTrade"
+ticker = "tickers"
+l2_orderbook = "orderbook.50"
+
+[[venues.subscriptions]]
+instrument = "BTCUSDT"
+canonical_symbol = "BTC/USDT"
+data_types = ["trade", "ticker", "l2_orderbook"]
+
+[[venues.subscriptions]]
+instrument = "ETHUSDT"
+canonical_symbol = "ETH/USDT"
+data_types = ["trade", "ticker", "l2_orderbook"]
+
+# ── Bybit Linear (USDT perps) ────────────────
+
+[[venues]]
+id = "bybit-linear"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://stream.bybit.com/v5/public/linear"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 20
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+batch_subscribe_template = '{"op":"subscribe","args":${params}}'
+stream_format = "${channel}.${instrument}"
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "publicTrade"
+ticker = "tickers"
+l2_orderbook = "orderbook.50"
+liquidation = "liquidation"
+
+[[venues.subscriptions]]
+instrument = "BTCUSDT"
+canonical_symbol = "BTC/USDT"
+data_types = ["trade", "ticker", "l2_orderbook", "liquidation"]
+
+[[venues.subscriptions]]
+instrument = "ETHUSDT"
+canonical_symbol = "ETH/USDT"
+data_types = ["trade", "ticker", "l2_orderbook", "liquidation"]

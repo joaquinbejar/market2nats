@@ -114,4 +114,13 @@ mod tests {
             assert_eq!(sub.data_types, vec!["trade".to_owned()]);
         }
     }
+
+    #[test]
+    fn test_load_config_parses_bybit_profile() {
+        let config = load_config("config/relay.bybit.toml").unwrap();
+        assert_eq!(config.venues.len(), 2);
+        assert_eq!(config.venues[0].id, "bybit");
+        assert_eq!(config.venues[1].id, "bybit-linear");
+        assert!(!config.nats.streams.is_empty());
+    }
 }

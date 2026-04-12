@@ -159,9 +159,8 @@ impl GenericWsAdapter {
 
     /// Attempts to parse a JSON message into domain events.
     ///
-    /// Handles two formats:
-    /// - Direct: `{"e":"trade","s":"BTCUSDT","p":"50000",...}`
-    /// - Combined stream (Binance): `{"stream":"btcusdt@trade","data":{...}}`
+    /// Dispatches by `venue_id` to venue-specific parsers first; falls back
+    /// to the Binance-compatible paths (combined stream, direct-top-level).
     fn parse_message(&self, text: &str) -> Result<Vec<MarketDataEnvelope>, VenueError> {
         trace!(venue = %self.venue_id, message = %text, "received ws message");
 
@@ -170,6 +169,14 @@ impl GenericWsAdapter {
                 venue: self.venue_id.as_str().to_owned(),
                 reason: format!("json parse error: {e}"),
             })?;
+
+        // Venue-specific envelope shapes are handled before the generic paths.
+        // Each venue that diverges from the Binance-shaped payload gets one
+        // match arm here plus a helper method below.
+        match self.venue_id.as_str() {
+            "bybit" | "bybit-linear" => return self.parse_bybit_envelope(&value),
+            _ => {}
+        }
 
         // Handle Binance combined stream format: {"stream":"btcusdt@trade","data":{...}}
         if let Some(stream_name) = value.get("stream").and_then(|v| v.as_str())
@@ -180,6 +187,303 @@ impl GenericWsAdapter {
 
         // Direct format — try to extract from top-level fields.
         self.parse_direct_message(&value)
+    }
+
+    /// Parses a Bybit v5 public stream envelope:
+    /// `{"topic":"publicTrade.BTCUSDT","type":"snapshot","ts":...,"data":[...]}`.
+    ///
+    /// Supported topics:
+    /// - `publicTrade.{symbol}`   → [`MarketDataType::Trade`]
+    /// - `tickers.{symbol}`       → [`MarketDataType::Ticker`]
+    /// - `orderbook.{N}.{symbol}` → [`MarketDataType::L2Orderbook`]
+    /// - `liquidation.{symbol}`   → [`MarketDataType::Liquidation`] (linear only)
+    fn parse_bybit_envelope(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        let topic = match value.get("topic").and_then(|v| v.as_str()) {
+            Some(t) => t,
+            None => return Ok(Vec::new()),
+        };
+
+        // Topic format: "<kind>.<symbol>" or "<kind>.<depth>.<symbol>".
+        let mut parts = topic.split('.');
+        let kind = match parts.next() {
+            Some(k) => k,
+            None => return Ok(Vec::new()),
+        };
+
+        let (data_type, symbol) = match kind {
+            "publicTrade" => {
+                let sym = parts.next().unwrap_or("");
+                (MarketDataType::Trade, sym)
+            }
+            "tickers" => {
+                let sym = parts.next().unwrap_or("");
+                (MarketDataType::Ticker, sym)
+            }
+            "orderbook" => {
+                // orderbook.<depth>.<symbol>
+                let _depth = parts.next().unwrap_or("");
+                let sym = parts.next().unwrap_or("");
+                (MarketDataType::L2Orderbook, sym)
+            }
+            "liquidation" => {
+                let sym = parts.next().unwrap_or("");
+                (MarketDataType::Liquidation, sym)
+            }
+            _ => return Ok(Vec::new()),
+        };
+
+        if symbol.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let canonical = match self.lookup_canonical(symbol) {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+
+        let instrument_id =
+            InstrumentId::try_new(symbol).map_err(|e| VenueError::ReceiveFailed {
+                venue: self.venue_id.as_str().to_owned(),
+                reason: e.to_string(),
+            })?;
+        let canonical_symbol =
+            CanonicalSymbol::try_new(&canonical).map_err(|e| VenueError::ReceiveFailed {
+                venue: self.venue_id.as_str().to_owned(),
+                reason: e.to_string(),
+            })?;
+
+        let ts = value.get("ts").and_then(|v| v.as_u64()).map(Timestamp::new);
+        let data = match value.get("data") {
+            Some(d) => d,
+            None => return Ok(Vec::new()),
+        };
+
+        let mut events = Vec::new();
+        let msg_type = value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("delta");
+
+        match data_type {
+            MarketDataType::Trade => {
+                // Data is an array of trade objects.
+                let arr = match data.as_array() {
+                    Some(a) => a,
+                    None => return Ok(Vec::new()),
+                };
+                for item in arr {
+                    if let Some(ev) =
+                        self.build_bybit_trade(item, &instrument_id, &canonical_symbol, ts)?
+                    {
+                        events.push(ev);
+                    }
+                }
+            }
+            MarketDataType::Ticker => {
+                // Data is an object with bid1Price/bid1Size/ask1Price/ask1Size/lastPrice.
+                // Partial-field deltas are silently skipped; only full updates emit a Ticker.
+                if let Some(ev) =
+                    self.build_bybit_ticker(data, &instrument_id, &canonical_symbol, ts)?
+                {
+                    events.push(ev);
+                }
+            }
+            MarketDataType::L2Orderbook => {
+                // Data is an object with s, b, a, u, seq.
+                if let Some(ev) = self.build_bybit_orderbook(
+                    data,
+                    msg_type,
+                    &instrument_id,
+                    &canonical_symbol,
+                    ts,
+                )? {
+                    events.push(ev);
+                }
+            }
+            MarketDataType::Liquidation => {
+                // Data is an object with side, size, price, updatedTime.
+                if let Some(ev) =
+                    self.build_bybit_liquidation(data, &instrument_id, &canonical_symbol, ts)?
+                {
+                    events.push(ev);
+                }
+            }
+            MarketDataType::FundingRate => {}
+        }
+
+        Ok(events)
+    }
+
+    fn build_bybit_trade(
+        &self,
+        item: &serde_json::Value,
+        instrument: &InstrumentId,
+        canonical: &CanonicalSymbol,
+        envelope_ts: Option<Timestamp>,
+    ) -> Result<Option<MarketDataEnvelope>, VenueError> {
+        let price = match extract_decimal(item, &["p"]).and_then(|d| Price::try_new(d).ok()) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let quantity = match extract_decimal(item, &["v"]).and_then(|d| Quantity::try_new(d).ok()) {
+            Some(q) => q,
+            None => return Ok(None),
+        };
+        let side = item
+            .get("S")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Side::from_str_loose(s).ok())
+            .unwrap_or(Side::Buy);
+        let trade_id = item.get("i").and_then(|v| v.as_str()).map(|s| s.to_owned());
+        let exchange_ts = item
+            .get("T")
+            .and_then(|v| v.as_u64())
+            .map(Timestamp::new)
+            .or(envelope_ts);
+
+        Ok(Some(MarketDataEnvelope {
+            venue: self.venue_id.clone(),
+            instrument: instrument.clone(),
+            canonical_symbol: canonical.clone(),
+            data_type: MarketDataType::Trade,
+            received_at: Timestamp::now(),
+            exchange_timestamp: exchange_ts,
+            sequence: Sequence::new(0),
+            payload: MarketDataPayload::Trade(Trade {
+                price,
+                quantity,
+                side,
+                trade_id,
+            }),
+        }))
+    }
+
+    fn build_bybit_ticker(
+        &self,
+        data: &serde_json::Value,
+        instrument: &InstrumentId,
+        canonical: &CanonicalSymbol,
+        envelope_ts: Option<Timestamp>,
+    ) -> Result<Option<MarketDataEnvelope>, VenueError> {
+        // Bybit v5 tickers: bid1Price, bid1Size, ask1Price, ask1Size, lastPrice.
+        let bid_price =
+            match extract_decimal(data, &["bid1Price"]).and_then(|d| Price::try_new(d).ok()) {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+        let bid_qty =
+            match extract_decimal(data, &["bid1Size"]).and_then(|d| Quantity::try_new(d).ok()) {
+                Some(q) => q,
+                None => return Ok(None),
+            };
+        let ask_price =
+            match extract_decimal(data, &["ask1Price"]).and_then(|d| Price::try_new(d).ok()) {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+        let ask_qty =
+            match extract_decimal(data, &["ask1Size"]).and_then(|d| Quantity::try_new(d).ok()) {
+                Some(q) => q,
+                None => return Ok(None),
+            };
+        let last_price =
+            match extract_decimal(data, &["lastPrice"]).and_then(|d| Price::try_new(d).ok()) {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+
+        Ok(Some(MarketDataEnvelope {
+            venue: self.venue_id.clone(),
+            instrument: instrument.clone(),
+            canonical_symbol: canonical.clone(),
+            data_type: MarketDataType::Ticker,
+            received_at: Timestamp::now(),
+            exchange_timestamp: envelope_ts,
+            sequence: Sequence::new(0),
+            payload: MarketDataPayload::Ticker(Ticker {
+                bid_price,
+                bid_qty,
+                ask_price,
+                ask_qty,
+                last_price,
+            }),
+        }))
+    }
+
+    fn build_bybit_orderbook(
+        &self,
+        data: &serde_json::Value,
+        msg_type: &str,
+        instrument: &InstrumentId,
+        canonical: &CanonicalSymbol,
+        envelope_ts: Option<Timestamp>,
+    ) -> Result<Option<MarketDataEnvelope>, VenueError> {
+        let bids = parse_price_levels(data, &["b"]);
+        let asks = parse_price_levels(data, &["a"]);
+        if bids.is_empty() && asks.is_empty() {
+            return Ok(None);
+        }
+        let is_snapshot = msg_type == "snapshot";
+        Ok(Some(MarketDataEnvelope {
+            venue: self.venue_id.clone(),
+            instrument: instrument.clone(),
+            canonical_symbol: canonical.clone(),
+            data_type: MarketDataType::L2Orderbook,
+            received_at: Timestamp::now(),
+            exchange_timestamp: envelope_ts,
+            sequence: Sequence::new(0),
+            payload: MarketDataPayload::L2Update(L2Update {
+                bids,
+                asks,
+                is_snapshot,
+            }),
+        }))
+    }
+
+    fn build_bybit_liquidation(
+        &self,
+        data: &serde_json::Value,
+        instrument: &InstrumentId,
+        canonical: &CanonicalSymbol,
+        envelope_ts: Option<Timestamp>,
+    ) -> Result<Option<MarketDataEnvelope>, VenueError> {
+        let price = match extract_decimal(data, &["price"]).and_then(|d| Price::try_new(d).ok()) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let quantity =
+            match extract_decimal(data, &["size"]).and_then(|d| Quantity::try_new(d).ok()) {
+                Some(q) => q,
+                None => return Ok(None),
+            };
+        let side = data
+            .get("side")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Side::from_str_loose(s).ok())
+            .unwrap_or(Side::Sell);
+        let exchange_ts = data
+            .get("updatedTime")
+            .and_then(|v| v.as_u64())
+            .map(Timestamp::new)
+            .or(envelope_ts);
+
+        Ok(Some(MarketDataEnvelope {
+            venue: self.venue_id.clone(),
+            instrument: instrument.clone(),
+            canonical_symbol: canonical.clone(),
+            data_type: MarketDataType::Liquidation,
+            received_at: Timestamp::now(),
+            exchange_timestamp: exchange_ts,
+            sequence: Sequence::new(0),
+            payload: MarketDataPayload::Liquidation(Liquidation {
+                side,
+                price,
+                quantity,
+            }),
+        }))
     }
 
     /// Parses a Binance combined stream message.
@@ -743,15 +1047,27 @@ fn parse_price_levels(value: &serde_json::Value, keys: &[&str]) -> Vec<(Price, Q
             let mut levels = Vec::with_capacity(arr.len());
             for item in arr {
                 if let Some(inner) = item.as_array().filter(|a| a.len() >= 2) {
-                    let price = inner[0]
-                        .as_str()
+                    let price = inner
+                        .first()
+                        .and_then(|v| v.as_str())
                         .and_then(|s| s.parse::<Decimal>().ok())
-                        .or_else(|| inner[0].as_f64().and_then(|f| Decimal::try_from(f).ok()))
+                        .or_else(|| {
+                            inner
+                                .first()
+                                .and_then(|v| v.as_f64())
+                                .and_then(|f| Decimal::try_from(f).ok())
+                        })
                         .and_then(|d| Price::try_new(d).ok());
-                    let qty = inner[1]
-                        .as_str()
+                    let qty = inner
+                        .get(1)
+                        .and_then(|v| v.as_str())
                         .and_then(|s| s.parse::<Decimal>().ok())
-                        .or_else(|| inner[1].as_f64().and_then(|f| Decimal::try_from(f).ok()))
+                        .or_else(|| {
+                            inner
+                                .get(1)
+                                .and_then(|v| v.as_f64())
+                                .and_then(|f| Decimal::try_from(f).ok())
+                        })
                         .and_then(|d| Quantity::try_new(d).ok());
                     if let (Some(p), Some(q)) = (price, qty) {
                         levels.push((p, q));
@@ -764,4 +1080,217 @@ fn parse_price_levels(value: &serde_json::Value, keys: &[&str]) -> Vec<(Price, Q
         }
     }
     Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::model::GenericWsConfig;
+    use std::collections::HashMap;
+
+    fn make_adapter(venue_id: &str, channel_map: &[(&str, &str)]) -> GenericWsAdapter {
+        let conn = ConnectionConfig {
+            ws_url: "wss://example.invalid/ws".to_owned(),
+            reconnect_delay_ms: 1000,
+            max_reconnect_delay_ms: 60000,
+            max_reconnect_attempts: 0,
+            ping_interval_secs: 30,
+            pong_timeout_secs: 10,
+        };
+        let mut cm = HashMap::new();
+        for (k, v) in channel_map {
+            cm.insert((*k).to_owned(), (*v).to_owned());
+        }
+        let ws_cfg = GenericWsConfig {
+            subscribe_template: None,
+            batch_subscribe_template: None,
+            stream_format: "${channel}.${instrument}".to_owned(),
+            channel_map: cm,
+            message_format: "json".to_owned(),
+        };
+        let mut adapter =
+            GenericWsAdapter::new(venue_id, conn, ws_cfg, None).expect("adapter creation succeeds");
+        // Seed the instrument map so parsers can resolve canonical symbols.
+        adapter
+            .instrument_map
+            .insert("BTCUSDT".to_owned(), "BTC/USDT".to_owned());
+        adapter
+            .instrument_map
+            .insert("btcusdt".to_owned(), "BTC/USDT".to_owned());
+        adapter
+            .instrument_map
+            .insert("ETHUSDT".to_owned(), "ETH/USDT".to_owned());
+        adapter
+            .instrument_map
+            .insert("ethusdt".to_owned(), "ETH/USDT".to_owned());
+        adapter
+    }
+
+    // ── Bybit ───────────────────────────────────────────────────────────
+
+    fn bybit_adapter() -> GenericWsAdapter {
+        make_adapter(
+            "bybit",
+            &[
+                ("trade", "publicTrade"),
+                ("ticker", "tickers"),
+                ("l2_orderbook", "orderbook.50"),
+            ],
+        )
+    }
+
+    #[test]
+    fn test_bybit_parse_public_trade_snapshot_yields_trade() {
+        let adapter = bybit_adapter();
+        let msg = r#"{
+            "topic": "publicTrade.BTCUSDT",
+            "type": "snapshot",
+            "ts": 1672304486868,
+            "data": [{
+                "T": 1672304486865,
+                "s": "BTCUSDT",
+                "S": "Buy",
+                "v": "0.001",
+                "p": "16578.50",
+                "L": "PlusTick",
+                "i": "20f43950-d8dd-5b31-9112-a178eb6023af",
+                "BT": false
+            }]
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.data_type, MarketDataType::Trade);
+        assert_eq!(ev.canonical_symbol.as_str(), "BTC/USDT");
+        assert_eq!(
+            ev.exchange_timestamp.map(|t| t.as_millis()),
+            Some(1_672_304_486_865)
+        );
+        match &ev.payload {
+            MarketDataPayload::Trade(t) => {
+                assert_eq!(t.side, Side::Buy);
+                assert_eq!(
+                    t.trade_id.as_deref(),
+                    Some("20f43950-d8dd-5b31-9112-a178eb6023af")
+                );
+            }
+            other => panic!("expected Trade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bybit_parse_tickers_yields_ticker() {
+        let adapter = bybit_adapter();
+        let msg = r#"{
+            "topic": "tickers.BTCUSDT",
+            "type": "snapshot",
+            "ts": 1672304486868,
+            "data": {
+                "symbol": "BTCUSDT",
+                "bid1Price": "16578.49",
+                "bid1Size": "1.2",
+                "ask1Price": "16578.51",
+                "ask1Size": "0.8",
+                "lastPrice": "16578.50"
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.data_type, MarketDataType::Ticker);
+        match &ev.payload {
+            MarketDataPayload::Ticker(_) => {}
+            other => panic!("expected Ticker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bybit_parse_orderbook_snapshot_flags_is_snapshot() {
+        let adapter = bybit_adapter();
+        let msg = r#"{
+            "topic": "orderbook.50.BTCUSDT",
+            "type": "snapshot",
+            "ts": 1672304484978,
+            "data": {
+                "s": "BTCUSDT",
+                "b": [["16493.50","0.006"], ["16493.00","0.100"]],
+                "a": [["16611.00","0.029"]],
+                "u": 18521288,
+                "seq": 7961638724
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => {
+                assert!(u.is_snapshot);
+                assert_eq!(u.bids.len(), 2);
+                assert_eq!(u.asks.len(), 1);
+            }
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bybit_parse_orderbook_delta_flags_not_snapshot() {
+        let adapter = bybit_adapter();
+        let msg = r#"{
+            "topic": "orderbook.50.BTCUSDT",
+            "type": "delta",
+            "ts": 1672304484979,
+            "data": {
+                "s": "BTCUSDT",
+                "b": [["16493.50","0.007"]],
+                "a": [],
+                "u": 18521289,
+                "seq": 7961638725
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => assert!(!u.is_snapshot),
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bybit_parse_liquidation_linear_yields_liquidation() {
+        let mut adapter = make_adapter(
+            "bybit-linear",
+            &[("trade", "publicTrade"), ("liquidation", "liquidation")],
+        );
+        // Add linear symbol mapping.
+        adapter
+            .instrument_map
+            .insert("BTCUSDT".to_owned(), "BTC/USDT".to_owned());
+        let msg = r#"{
+            "topic": "liquidation.BTCUSDT",
+            "type": "snapshot",
+            "ts": 1672304486868,
+            "data": {
+                "updatedTime": 1672304486868,
+                "symbol": "BTCUSDT",
+                "side": "Sell",
+                "size": "0.003",
+                "price": "16578.50"
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::Liquidation(l) => {
+                assert_eq!(l.side, Side::Sell);
+            }
+            other => panic!("expected Liquidation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bybit_unknown_topic_returns_empty() {
+        let adapter = bybit_adapter();
+        let msg = r#"{"topic":"kline.1.BTCUSDT","type":"snapshot","ts":1,"data":{}}"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert!(events.is_empty());
+    }
 }
