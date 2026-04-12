@@ -217,6 +217,7 @@ impl GenericWsAdapter {
             "kraken" => return self.parse_kraken_envelope(&value),
             "kraken-futures" => return self.parse_kraken_futures_envelope(&value),
             "gate" | "gate-futures" => return self.parse_gate_envelope(&value),
+            "okx" | "okx-swap" => return self.parse_okx_envelope(&value),
             _ => {}
         }
 
@@ -1905,6 +1906,294 @@ impl GenericWsAdapter {
             });
         }
         Ok(events)
+    }
+
+    /// Parses an OKX v5 public envelope:
+    /// `{"arg":{"channel":"trades","instId":"BTC-USDT"},"data":[{...}]}`.
+    ///
+    /// Supported channels: `trades`, `tickers`, `books`, `funding-rate`,
+    /// `liquidation-orders` (subscribed by `instType`, one event per
+    /// contract inside `data[].details`).
+    fn parse_okx_envelope(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        let arg = match value.get("arg") {
+            Some(a) => a,
+            None => return Ok(Vec::new()),
+        };
+        let channel = match arg.get("channel").and_then(|v| v.as_str()) {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+        let data_arr = match value.get("data").and_then(|v| v.as_array()) {
+            Some(a) => a,
+            None => return Ok(Vec::new()),
+        };
+
+        let action = value.get("action").and_then(|v| v.as_str()).unwrap_or("");
+
+        let mut events = Vec::new();
+        match channel {
+            "trades" => {
+                for item in data_arr {
+                    let inst = match item.get("instId").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let (instrument, canonical) = match self.resolve_okx_instrument(inst) {
+                        Some(x) => x,
+                        None => continue,
+                    };
+                    let price =
+                        match extract_decimal(item, &["px"]).and_then(|d| Price::try_new(d).ok()) {
+                            Some(p) => p,
+                            None => continue,
+                        };
+                    let quantity = match extract_decimal(item, &["sz"])
+                        .and_then(|d| Quantity::try_new(d).ok())
+                    {
+                        Some(q) => q,
+                        None => continue,
+                    };
+                    let side = item
+                        .get("side")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| Side::from_str_loose(s).ok())
+                        .unwrap_or(Side::Buy);
+                    let trade_id = item
+                        .get("tradeId")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_owned());
+                    let exchange_ts = item
+                        .get("ts")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map(Timestamp::new);
+                    events.push(MarketDataEnvelope {
+                        venue: self.venue_id.clone(),
+                        instrument,
+                        canonical_symbol: canonical,
+                        data_type: MarketDataType::Trade,
+                        received_at: Timestamp::now(),
+                        exchange_timestamp: exchange_ts,
+                        sequence: Sequence::new(0),
+                        payload: MarketDataPayload::Trade(Trade {
+                            price,
+                            quantity,
+                            side,
+                            trade_id,
+                        }),
+                    });
+                }
+            }
+            "tickers" => {
+                for item in data_arr {
+                    let inst = match item.get("instId").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let (instrument, canonical) = match self.resolve_okx_instrument(inst) {
+                        Some(x) => x,
+                        None => continue,
+                    };
+                    let bid_price = match extract_decimal(item, &["bidPx"])
+                        .and_then(|d| Price::try_new(d).ok())
+                    {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let bid_qty = match extract_decimal(item, &["bidSz"])
+                        .and_then(|d| Quantity::try_new(d).ok())
+                    {
+                        Some(q) => q,
+                        None => continue,
+                    };
+                    let ask_price = match extract_decimal(item, &["askPx"])
+                        .and_then(|d| Price::try_new(d).ok())
+                    {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let ask_qty = match extract_decimal(item, &["askSz"])
+                        .and_then(|d| Quantity::try_new(d).ok())
+                    {
+                        Some(q) => q,
+                        None => continue,
+                    };
+                    let last_price = match extract_decimal(item, &["last"])
+                        .and_then(|d| Price::try_new(d).ok())
+                    {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let exchange_ts = item
+                        .get("ts")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map(Timestamp::new);
+                    events.push(MarketDataEnvelope {
+                        venue: self.venue_id.clone(),
+                        instrument,
+                        canonical_symbol: canonical,
+                        data_type: MarketDataType::Ticker,
+                        received_at: Timestamp::now(),
+                        exchange_timestamp: exchange_ts,
+                        sequence: Sequence::new(0),
+                        payload: MarketDataPayload::Ticker(Ticker {
+                            bid_price,
+                            bid_qty,
+                            ask_price,
+                            ask_qty,
+                            last_price,
+                        }),
+                    });
+                }
+            }
+            "books" | "books5" | "books50-l2-tbt" | "books-l2-tbt" => {
+                let inst = match arg.get("instId").and_then(|v| v.as_str()) {
+                    Some(s) => s,
+                    None => return Ok(Vec::new()),
+                };
+                let (instrument, canonical) = match self.resolve_okx_instrument(inst) {
+                    Some(x) => x,
+                    None => return Ok(Vec::new()),
+                };
+                for item in data_arr {
+                    let bids = parse_price_levels(item, &["bids"]);
+                    let asks = parse_price_levels(item, &["asks"]);
+                    if bids.is_empty() && asks.is_empty() {
+                        continue;
+                    }
+                    let exchange_ts = item
+                        .get("ts")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map(Timestamp::new);
+                    events.push(MarketDataEnvelope {
+                        venue: self.venue_id.clone(),
+                        instrument: instrument.clone(),
+                        canonical_symbol: canonical.clone(),
+                        data_type: MarketDataType::L2Orderbook,
+                        received_at: Timestamp::now(),
+                        exchange_timestamp: exchange_ts,
+                        sequence: Sequence::new(0),
+                        payload: MarketDataPayload::L2Update(L2Update {
+                            bids,
+                            asks,
+                            is_snapshot: action == "snapshot",
+                        }),
+                    });
+                }
+            }
+            "funding-rate" => {
+                for item in data_arr {
+                    let inst = match item.get("instId").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let (instrument, canonical) = match self.resolve_okx_instrument(inst) {
+                        Some(x) => x,
+                        None => continue,
+                    };
+                    let rate = match extract_decimal(item, &["fundingRate"]) {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                    let predicted = extract_decimal(item, &["nextFundingRate"]);
+                    let next_at = item
+                        .get("nextFundingTime")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    events.push(MarketDataEnvelope {
+                        venue: self.venue_id.clone(),
+                        instrument,
+                        canonical_symbol: canonical,
+                        data_type: MarketDataType::FundingRate,
+                        received_at: Timestamp::now(),
+                        exchange_timestamp: item
+                            .get("fundingTime")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .map(Timestamp::new),
+                        sequence: Sequence::new(0),
+                        payload: MarketDataPayload::FundingRate(FundingRate {
+                            rate,
+                            predicted_rate: predicted,
+                            next_funding_at: Timestamp::new(next_at),
+                        }),
+                    });
+                }
+            }
+            "liquidation-orders" => {
+                // Subscribed by instType; each data item aggregates per instFamily
+                // with a `details` array of individual liquidations.
+                for item in data_arr {
+                    let inst = match item.get("instId").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let (instrument, canonical) = match self.resolve_okx_instrument(inst) {
+                        Some(x) => x,
+                        None => continue,
+                    };
+                    let details = match item.get("details").and_then(|v| v.as_array()) {
+                        Some(d) => d,
+                        None => continue,
+                    };
+                    for detail in details {
+                        let price = match extract_decimal(detail, &["bkPx"])
+                            .and_then(|d| Price::try_new(d).ok())
+                        {
+                            Some(p) => p,
+                            None => continue,
+                        };
+                        let quantity = match extract_decimal(detail, &["sz"])
+                            .and_then(|d| Quantity::try_new(d).ok())
+                        {
+                            Some(q) => q,
+                            None => continue,
+                        };
+                        let side = detail
+                            .get("side")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| Side::from_str_loose(s).ok())
+                            .unwrap_or(Side::Sell);
+                        events.push(MarketDataEnvelope {
+                            venue: self.venue_id.clone(),
+                            instrument: instrument.clone(),
+                            canonical_symbol: canonical.clone(),
+                            data_type: MarketDataType::Liquidation,
+                            received_at: Timestamp::now(),
+                            exchange_timestamp: detail
+                                .get("ts")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse::<u64>().ok())
+                                .map(Timestamp::new),
+                            sequence: Sequence::new(0),
+                            payload: MarketDataPayload::Liquidation(Liquidation {
+                                side,
+                                price,
+                                quantity,
+                            }),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(events)
+    }
+
+    fn resolve_okx_instrument(
+        &self,
+        instrument_str: &str,
+    ) -> Option<(InstrumentId, CanonicalSymbol)> {
+        let canonical = self.lookup_canonical(instrument_str)?;
+        let instrument_id = InstrumentId::try_new(instrument_str).ok()?;
+        let canonical_symbol = CanonicalSymbol::try_new(&canonical).ok()?;
+        Some((instrument_id, canonical_symbol))
     }
 
     /// Parses a Binance combined stream message.
@@ -4440,6 +4729,177 @@ mod tests {
     fn test_gate_subscribe_ack_returns_empty() {
         let adapter = make_gate_adapter("gate");
         let msg = r#"{"time":1700000000,"channel":"spot.trades","event":"subscribe","result":{"status":"success"}}"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert!(events.is_empty());
+    }
+
+    fn make_okx_adapter(venue_id: &str) -> GenericWsAdapter {
+        let conn = ConnectionConfig {
+            ws_url: "wss://example.invalid/ws".to_owned(),
+            reconnect_delay_ms: 1000,
+            max_reconnect_delay_ms: 60000,
+            max_reconnect_attempts: 0,
+            ping_interval_secs: 25,
+            pong_timeout_secs: 10,
+        };
+        let mut cm = HashMap::new();
+        cm.insert("trade".to_owned(), "trades".to_owned());
+        cm.insert("ticker".to_owned(), "tickers".to_owned());
+        cm.insert("l2_orderbook".to_owned(), "books".to_owned());
+        cm.insert("funding_rate".to_owned(), "funding-rate".to_owned());
+        cm.insert("liquidation".to_owned(), "liquidation-orders".to_owned());
+        let ws_cfg = GenericWsConfig {
+            subscribe_template: None,
+            batch_subscribe_template: None,
+            stream_format: "${channel}".to_owned(),
+            channel_map: cm,
+            message_format: "json".to_owned(),
+        };
+        let mut adapter =
+            GenericWsAdapter::new(venue_id, conn, ws_cfg, None).expect("adapter creation succeeds");
+        adapter
+            .instrument_map
+            .insert("BTC-USDT".to_owned(), "BTC/USDT".to_owned());
+        adapter
+            .instrument_map
+            .insert("ETH-USDT".to_owned(), "ETH/USDT".to_owned());
+        adapter
+            .instrument_map
+            .insert("BTC-USDT-SWAP".to_owned(), "BTC/USDT".to_owned());
+        adapter
+            .instrument_map
+            .insert("ETH-USDT-SWAP".to_owned(), "ETH/USDT".to_owned());
+        adapter
+    }
+
+    #[test]
+    fn test_okx_parse_trades_yields_trade() {
+        let adapter = make_okx_adapter("okx");
+        let msg = r#"{
+            "arg": {"channel":"trades","instId":"BTC-USDT"},
+            "data": [{
+                "instId": "BTC-USDT",
+                "tradeId": "130639474",
+                "px": "42219.9",
+                "sz": "0.12060306",
+                "side": "buy",
+                "ts": "1629386267792"
+            }]
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::Trade(t) => {
+                assert_eq!(t.side, Side::Buy);
+                assert_eq!(t.trade_id.as_deref(), Some("130639474"));
+            }
+            other => panic!("expected Trade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_okx_parse_tickers_yields_ticker() {
+        let adapter = make_okx_adapter("okx");
+        let msg = r#"{
+            "arg": {"channel":"tickers","instId":"BTC-USDT"},
+            "data": [{
+                "instId": "BTC-USDT",
+                "last": "42000.5",
+                "bidPx": "42000.3",
+                "bidSz": "1.0",
+                "askPx": "42000.7",
+                "askSz": "2.0",
+                "ts": "1629386267792"
+            }]
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::Ticker(_) => {}
+            other => panic!("expected Ticker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_okx_parse_books_snapshot_uses_four_element_levels() {
+        let adapter = make_okx_adapter("okx");
+        // OKX levels are [price, size, liquidated_orders, order_count];
+        // parse_price_levels reads only indices 0 and 1.
+        let msg = r#"{
+            "arg": {"channel":"books","instId":"BTC-USDT"},
+            "action": "snapshot",
+            "data": [{
+                "asks": [["42226.0","0.02","0","2"]],
+                "bids": [["42225.9","0.12","0","1"]],
+                "ts": "1629386267792",
+                "checksum": -1076137876,
+                "seqId": 123456
+            }]
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => {
+                assert!(u.is_snapshot);
+                assert_eq!(u.bids.len(), 1);
+                assert_eq!(u.asks.len(), 1);
+            }
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_okx_parse_funding_rate_yields_funding_rate() {
+        let adapter = make_okx_adapter("okx-swap");
+        let msg = r#"{
+            "arg": {"channel":"funding-rate","instId":"BTC-USDT-SWAP"},
+            "data": [{
+                "instId": "BTC-USDT-SWAP",
+                "fundingRate": "0.000123",
+                "nextFundingRate": "0.00011",
+                "fundingTime": "1629986400000",
+                "nextFundingTime": "1630015200000"
+            }]
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::FundingRate(f) => {
+                use rust_decimal_macros::dec;
+                assert_eq!(f.rate, dec!(0.000123));
+                assert_eq!(f.predicted_rate, Some(dec!(0.00011)));
+            }
+            other => panic!("expected FundingRate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_okx_parse_liquidation_orders_fans_out_details() {
+        let adapter = make_okx_adapter("okx-swap");
+        let msg = r#"{
+            "arg": {"channel":"liquidation-orders","instType":"SWAP"},
+            "data": [{
+                "details": [
+                    {"side":"sell","sz":"0.001","bkPx":"42219.9","ts":"1629386267792"},
+                    {"side":"buy","sz":"0.002","bkPx":"42220.0","ts":"1629386267793"}
+                ],
+                "instFamily": "BTC-USDT",
+                "instId": "BTC-USDT-SWAP",
+                "instType": "SWAP"
+            }]
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 2);
+        match &events[0].payload {
+            MarketDataPayload::Liquidation(l) => assert_eq!(l.side, Side::Sell),
+            other => panic!("expected Liquidation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_okx_unknown_channel_returns_empty() {
+        let adapter = make_okx_adapter("okx");
+        let msg = r#"{"arg":{"channel":"candle1m","instId":"BTC-USDT"},"data":[]}"#;
         let events = adapter.parse_message(msg).expect("parse ok");
         assert!(events.is_empty());
     }
