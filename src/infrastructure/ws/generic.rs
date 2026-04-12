@@ -6984,12 +6984,15 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&msgs[0]).expect("valid json");
         let args = parsed["args"].as_array().expect("args should be array");
         assert_eq!(args.len(), 2);
-        // Each element must be a JSON object, not a string.
-        assert!(args[0].is_object(), "expected object, got: {}", args[0]);
-        assert_eq!(args[0]["channel"].as_str(), Some("trades"));
-        assert_eq!(args[0]["instId"].as_str(), Some("BTC-USDT"));
-        assert!(args[1].is_object(), "expected object, got: {}", args[1]);
-        assert_eq!(args[1]["channel"].as_str(), Some("tickers"));
-        assert_eq!(args[1]["instId"].as_str(), Some("BTC-USDT"));
+        // Each element must be a JSON object with instId and a known channel.
+        // Order is an implementation detail, so collect channels into a set.
+        let mut seen_channels: Vec<&str> = Vec::new();
+        for arg in args {
+            assert!(arg.is_object(), "expected object, got: {}", arg);
+            assert_eq!(arg["instId"].as_str(), Some("BTC-USDT"));
+            seen_channels.push(arg["channel"].as_str().expect("channel should be string"));
+        }
+        seen_channels.sort();
+        assert_eq!(seen_channels, vec!["tickers", "trades"]);
     }
 }
