@@ -248,12 +248,21 @@ pub struct CircuitBreakerConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenericWsConfig {
-    /// Template for per-stream subscribe messages. Supports `${channel}` and `${instrument}`.
-    /// Used when `batch_subscribe_template` is not set.
+    /// Template for per-stream subscribe messages.
+    ///
+    /// Supported placeholders vary by `subscribe_mode`:
+    /// - `"per_pair"` (default): `${channel}`, `${instrument}`.
+    /// - `"per_channel"`: `${channel}`, `${instruments}` (JSON array of instrument strings).
+    ///
+    /// Not used in `"products_channels"` mode (use `batch_subscribe_template` instead).
     pub subscribe_template: Option<String>,
-    /// Template for batch subscribe. Supports `${params}` (JSON array of stream names).
-    /// Each stream name is built as `<instrument>@<channel>` from the stream_format.
-    /// Example: `{"method":"SUBSCRIBE","params":${params},"id":1}`
+    /// Template for batch subscribe.
+    ///
+    /// Supported placeholders vary by `subscribe_mode`:
+    /// - `"per_pair"` (default): `${params}` (JSON array of stream names built from
+    ///   `stream_format`). Example: `{"method":"SUBSCRIBE","params":${params},"id":1}`
+    /// - `"products_channels"`: `${instruments}` (JSON array of unique instrument strings)
+    ///   and `${channels}` (JSON array of unique channel strings).
     pub batch_subscribe_template: Option<String>,
     /// Format for individual stream names in batch mode. Default: `${instrument}@${channel}`.
     #[serde(default = "default_stream_format")]

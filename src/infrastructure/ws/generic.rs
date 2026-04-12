@@ -179,7 +179,17 @@ impl GenericWsAdapter {
             let params_json = if self.ws_config.args_format == "object" {
                 let values: Vec<serde_json::Value> = stream_names
                     .iter()
-                    .filter_map(|s| serde_json::from_str(s).ok())
+                    .filter_map(|s| match serde_json::from_str::<serde_json::Value>(s) {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            tracing::warn!(
+                                stream_name = %s,
+                                error = %e,
+                                "args_format=\"object\": stream name is not valid JSON, skipping"
+                            );
+                            None
+                        }
+                    })
                     .collect();
                 serde_json::to_string(&values).unwrap_or_default()
             } else {
