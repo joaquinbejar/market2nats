@@ -1,67 +1,48 @@
-[package]
-name = "market2nats"
-version = "0.1.0"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
 edition = "2024"
-description = "WebSocket market data → NATS JetStream relay"
-license = "MIT"
-repository = "https://github.com/joaquinbejar/market2nats"
-homepage = "https://github.com/joaquinbejar/market2nats"
-readme = "README.md"
-keywords = ["market-data", "nats", "websocket", "crypto", "trading"]
-categories = ["finance", "network-programming"]
- 
-[dependencies]
+
+[workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
- 
 # WebSocket
 tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
- 
 # NATS
 async-nats = "0.47"
- 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
 prost = "0.14"
+prost-build = "0.14"
 bytes = "1"
- 
 # Decimal arithmetic
 rust_decimal = { version = "1", features = ["serde-with-str"] }
 rust_decimal_macros = "1"
- 
 # Error handling
 thiserror = "2"
- 
 # Logging & observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
- 
 # Metrics
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
- 
 # Concurrent data structures
 dashmap = "6"
- 
 # HTTP server (health + metrics)
 axum = "0.8"
- 
 # Utilities
 futures-util = "0.3"
 url = "2"
- 
-[build-dependencies]
-prost-build = "0.14"
- 
-[dev-dependencies]
+# Dev/test
 tokio-test = "0.4"
-rust_decimal_macros = "1"
 reqwest = { version = "0.13", features = ["json"] }
 portpicker = "0.1"
 tempfile = "3"
- 
+
 [profile.release]
 lto = true
 codegen-units = 1
