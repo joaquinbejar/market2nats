@@ -215,6 +215,7 @@ impl GenericWsAdapter {
             "hyperliquid" => return self.parse_hyperliquid_envelope(&value),
             "crypto-com" | "crypto-com-perp" => return self.parse_crypto_com_envelope(&value),
             "kraken" => return self.parse_kraken_envelope(&value),
+            "kraken-futures" => return self.parse_kraken_futures_envelope(&value),
             _ => {}
         }
 
@@ -1118,6 +1119,371 @@ impl GenericWsAdapter {
             }
         }
         Ok(events)
+    }
+
+    /// Parses a Kraken Futures public envelope:
+    /// `{"feed":"trade","product_id":"PF_XBTUSD",...}` or similar.
+    ///
+    /// Supported feeds:
+    /// - `trade`         → [`MarketDataType::Trade`]; `type == "liquidation"` also emits a [`MarketDataType::Liquidation`].
+    /// - `trade_snapshot` → array of trade objects in `trades`; treated as deltas for consumers.
+    /// - `ticker`        → [`MarketDataType::Ticker`] AND a [`MarketDataType::FundingRate`] when `funding_rate` is present.
+    /// - `book_snapshot` → [`MarketDataType::L2Orderbook`] with `is_snapshot = true`.
+    /// - `book`          → per-level delta aggregated into a single-side [`MarketDataType::L2Orderbook`] update.
+    fn parse_kraken_futures_envelope(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        let feed = match value.get("feed").and_then(|v| v.as_str()) {
+            Some(f) => f,
+            None => return Ok(Vec::new()),
+        };
+        // Control events.
+        if matches!(
+            feed,
+            "heartbeat" | "info" | "subscribed" | "subscribed_result" | "unsubscribed"
+        ) {
+            return Ok(Vec::new());
+        }
+
+        let resolve = |product: &str| -> Result<(InstrumentId, CanonicalSymbol), VenueError> {
+            let canonical =
+                self.lookup_canonical(product)
+                    .ok_or_else(|| VenueError::ReceiveFailed {
+                        venue: self.venue_id.as_str().to_owned(),
+                        reason: format!("no canonical for product {product}"),
+                    })?;
+            let instrument_id =
+                InstrumentId::try_new(product).map_err(|e| VenueError::ReceiveFailed {
+                    venue: self.venue_id.as_str().to_owned(),
+                    reason: e.to_string(),
+                })?;
+            let canonical_symbol =
+                CanonicalSymbol::try_new(&canonical).map_err(|e| VenueError::ReceiveFailed {
+                    venue: self.venue_id.as_str().to_owned(),
+                    reason: e.to_string(),
+                })?;
+            Ok((instrument_id, canonical_symbol))
+        };
+
+        let mut events = Vec::new();
+
+        match feed {
+            "trade" => {
+                let product = match value.get("product_id").and_then(|v| v.as_str()) {
+                    Some(p) => p,
+                    None => return Ok(Vec::new()),
+                };
+                if self.lookup_canonical(product).is_none() {
+                    return Ok(Vec::new());
+                }
+                let (instrument, canonical) = resolve(product)?;
+                if let Some(ev) =
+                    self.build_kraken_futures_trade(value, instrument.clone(), canonical.clone())?
+                {
+                    events.push(ev);
+                }
+                // Liquidation tap — when type == "liquidation", also emit a Liquidation envelope.
+                if value.get("type").and_then(|v| v.as_str()) == Some("liquidation")
+                    && let Some(ev) =
+                        self.build_kraken_futures_liquidation(value, instrument, canonical)?
+                {
+                    events.push(ev);
+                }
+            }
+            "trade_snapshot" => {
+                let product = match value.get("product_id").and_then(|v| v.as_str()) {
+                    Some(p) => p,
+                    None => return Ok(Vec::new()),
+                };
+                if self.lookup_canonical(product).is_none() {
+                    return Ok(Vec::new());
+                }
+                let (instrument, canonical) = resolve(product)?;
+                let trades = match value.get("trades").and_then(|v| v.as_array()) {
+                    Some(a) => a,
+                    None => return Ok(Vec::new()),
+                };
+                for t in trades {
+                    if let Some(ev) =
+                        self.build_kraken_futures_trade(t, instrument.clone(), canonical.clone())?
+                    {
+                        events.push(ev);
+                    }
+                }
+            }
+            "ticker" => {
+                let product = match value.get("product_id").and_then(|v| v.as_str()) {
+                    Some(p) => p,
+                    None => return Ok(Vec::new()),
+                };
+                if self.lookup_canonical(product).is_none() {
+                    return Ok(Vec::new());
+                }
+                let (instrument, canonical) = resolve(product)?;
+                if let Some(ev) =
+                    self.build_kraken_futures_ticker(value, instrument.clone(), canonical.clone())?
+                {
+                    events.push(ev);
+                }
+                // Funding tap — ticker ships funding_rate and next_funding_rate_time on perps.
+                if value.get("funding_rate").is_some()
+                    && let Some(ev) =
+                        self.build_kraken_futures_funding(value, instrument, canonical)?
+                {
+                    events.push(ev);
+                }
+            }
+            "book_snapshot" => {
+                let product = match value.get("product_id").and_then(|v| v.as_str()) {
+                    Some(p) => p,
+                    None => return Ok(Vec::new()),
+                };
+                if self.lookup_canonical(product).is_none() {
+                    return Ok(Vec::new());
+                }
+                let (instrument, canonical) = resolve(product)?;
+                let bids = parse_kraken_levels(value.get("bids"));
+                let asks = parse_kraken_levels(value.get("asks"));
+                if !bids.is_empty() || !asks.is_empty() {
+                    events.push(MarketDataEnvelope {
+                        venue: self.venue_id.clone(),
+                        instrument,
+                        canonical_symbol: canonical,
+                        data_type: MarketDataType::L2Orderbook,
+                        received_at: Timestamp::now(),
+                        exchange_timestamp: value
+                            .get("timestamp")
+                            .and_then(|v| v.as_u64())
+                            .map(Timestamp::new),
+                        sequence: Sequence::new(0),
+                        payload: MarketDataPayload::L2Update(L2Update {
+                            bids,
+                            asks,
+                            is_snapshot: true,
+                        }),
+                    });
+                }
+            }
+            "book" => {
+                let product = match value.get("product_id").and_then(|v| v.as_str()) {
+                    Some(p) => p,
+                    None => return Ok(Vec::new()),
+                };
+                if self.lookup_canonical(product).is_none() {
+                    return Ok(Vec::new());
+                }
+                let (instrument, canonical) = resolve(product)?;
+                // A "book" delta is a single price level; routed to bids or asks
+                // based on side.
+                let price =
+                    match extract_decimal(value, &["price"]).and_then(|d| Price::try_new(d).ok()) {
+                        Some(p) => p,
+                        None => return Ok(Vec::new()),
+                    };
+                let quantity = match extract_decimal(value, &["qty"])
+                    .and_then(|d| Quantity::try_new(d).ok())
+                {
+                    Some(q) => q,
+                    None => return Ok(Vec::new()),
+                };
+                let is_bid = value.get("side").and_then(|v| v.as_str()) == Some("buy");
+                let (bids, asks) = if is_bid {
+                    (vec![(price, quantity)], Vec::new())
+                } else {
+                    (Vec::new(), vec![(price, quantity)])
+                };
+                events.push(MarketDataEnvelope {
+                    venue: self.venue_id.clone(),
+                    instrument,
+                    canonical_symbol: canonical,
+                    data_type: MarketDataType::L2Orderbook,
+                    received_at: Timestamp::now(),
+                    exchange_timestamp: value
+                        .get("timestamp")
+                        .and_then(|v| v.as_u64())
+                        .map(Timestamp::new),
+                    sequence: Sequence::new(0),
+                    payload: MarketDataPayload::L2Update(L2Update {
+                        bids,
+                        asks,
+                        is_snapshot: false,
+                    }),
+                });
+            }
+            _ => {}
+        }
+
+        Ok(events)
+    }
+
+    fn build_kraken_futures_trade(
+        &self,
+        item: &serde_json::Value,
+        instrument: InstrumentId,
+        canonical: CanonicalSymbol,
+    ) -> Result<Option<MarketDataEnvelope>, VenueError> {
+        let price = match extract_decimal(item, &["price"]).and_then(|d| Price::try_new(d).ok()) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let quantity = match extract_decimal(item, &["qty"]).and_then(|d| Quantity::try_new(d).ok())
+        {
+            Some(q) => q,
+            None => return Ok(None),
+        };
+        let side = item
+            .get("side")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Side::from_str_loose(s).ok())
+            .unwrap_or(Side::Buy);
+        let trade_id = item
+            .get("uid")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_owned());
+        let exchange_ts = item
+            .get("time")
+            .and_then(|v| v.as_u64())
+            .map(Timestamp::new);
+        Ok(Some(MarketDataEnvelope {
+            venue: self.venue_id.clone(),
+            instrument,
+            canonical_symbol: canonical,
+            data_type: MarketDataType::Trade,
+            received_at: Timestamp::now(),
+            exchange_timestamp: exchange_ts,
+            sequence: Sequence::new(0),
+            payload: MarketDataPayload::Trade(Trade {
+                price,
+                quantity,
+                side,
+                trade_id,
+            }),
+        }))
+    }
+
+    fn build_kraken_futures_ticker(
+        &self,
+        item: &serde_json::Value,
+        instrument: InstrumentId,
+        canonical: CanonicalSymbol,
+    ) -> Result<Option<MarketDataEnvelope>, VenueError> {
+        let bid_price = match extract_decimal(item, &["bid"]).and_then(|d| Price::try_new(d).ok()) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let bid_qty =
+            match extract_decimal(item, &["bid_size"]).and_then(|d| Quantity::try_new(d).ok()) {
+                Some(q) => q,
+                None => return Ok(None),
+            };
+        let ask_price = match extract_decimal(item, &["ask"]).and_then(|d| Price::try_new(d).ok()) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let ask_qty =
+            match extract_decimal(item, &["ask_size"]).and_then(|d| Quantity::try_new(d).ok()) {
+                Some(q) => q,
+                None => return Ok(None),
+            };
+        let last_price = match extract_decimal(item, &["last"]).and_then(|d| Price::try_new(d).ok())
+        {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let exchange_ts = item
+            .get("time")
+            .and_then(|v| v.as_u64())
+            .map(Timestamp::new);
+        Ok(Some(MarketDataEnvelope {
+            venue: self.venue_id.clone(),
+            instrument,
+            canonical_symbol: canonical,
+            data_type: MarketDataType::Ticker,
+            received_at: Timestamp::now(),
+            exchange_timestamp: exchange_ts,
+            sequence: Sequence::new(0),
+            payload: MarketDataPayload::Ticker(Ticker {
+                bid_price,
+                bid_qty,
+                ask_price,
+                ask_qty,
+                last_price,
+            }),
+        }))
+    }
+
+    fn build_kraken_futures_funding(
+        &self,
+        item: &serde_json::Value,
+        instrument: InstrumentId,
+        canonical: CanonicalSymbol,
+    ) -> Result<Option<MarketDataEnvelope>, VenueError> {
+        let rate = match extract_decimal(item, &["funding_rate"]) {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let predicted_rate = extract_decimal(item, &["funding_rate_prediction"]);
+        let next_funding_at = item
+            .get("next_funding_rate_time")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        Ok(Some(MarketDataEnvelope {
+            venue: self.venue_id.clone(),
+            instrument,
+            canonical_symbol: canonical,
+            data_type: MarketDataType::FundingRate,
+            received_at: Timestamp::now(),
+            exchange_timestamp: item
+                .get("time")
+                .and_then(|v| v.as_u64())
+                .map(Timestamp::new),
+            sequence: Sequence::new(0),
+            payload: MarketDataPayload::FundingRate(FundingRate {
+                rate,
+                predicted_rate,
+                next_funding_at: Timestamp::new(next_funding_at),
+            }),
+        }))
+    }
+
+    fn build_kraken_futures_liquidation(
+        &self,
+        item: &serde_json::Value,
+        instrument: InstrumentId,
+        canonical: CanonicalSymbol,
+    ) -> Result<Option<MarketDataEnvelope>, VenueError> {
+        let price = match extract_decimal(item, &["price"]).and_then(|d| Price::try_new(d).ok()) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let quantity = match extract_decimal(item, &["qty"]).and_then(|d| Quantity::try_new(d).ok())
+        {
+            Some(q) => q,
+            None => return Ok(None),
+        };
+        let side = item
+            .get("side")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Side::from_str_loose(s).ok())
+            .unwrap_or(Side::Sell);
+        Ok(Some(MarketDataEnvelope {
+            venue: self.venue_id.clone(),
+            instrument,
+            canonical_symbol: canonical,
+            data_type: MarketDataType::Liquidation,
+            received_at: Timestamp::now(),
+            exchange_timestamp: item
+                .get("time")
+                .and_then(|v| v.as_u64())
+                .map(Timestamp::new),
+            sequence: Sequence::new(0),
+            payload: MarketDataPayload::Liquidation(Liquidation {
+                side,
+                price,
+                quantity,
+            }),
+        }))
     }
 
     /// Parses a Binance combined stream message.
@@ -3304,5 +3670,171 @@ mod tests {
         let msg = r#"{"channel":"ohlc","type":"update","data":[]}"#;
         let events = adapter.parse_message(msg).expect("parse ok");
         assert!(events.is_empty());
+    }
+
+    fn make_kraken_futures_adapter() -> GenericWsAdapter {
+        let conn = ConnectionConfig {
+            ws_url: "wss://example.invalid/ws".to_owned(),
+            reconnect_delay_ms: 1000,
+            max_reconnect_delay_ms: 60000,
+            max_reconnect_attempts: 0,
+            ping_interval_secs: 25,
+            pong_timeout_secs: 10,
+        };
+        let mut cm = HashMap::new();
+        cm.insert("trade".to_owned(), "trade".to_owned());
+        cm.insert("ticker".to_owned(), "ticker".to_owned());
+        cm.insert("l2_orderbook".to_owned(), "book".to_owned());
+        cm.insert("funding_rate".to_owned(), "ticker".to_owned());
+        cm.insert("liquidation".to_owned(), "trade".to_owned());
+        let ws_cfg = GenericWsConfig {
+            subscribe_template: None,
+            batch_subscribe_template: None,
+            stream_format: "${channel}".to_owned(),
+            channel_map: cm,
+            message_format: "json".to_owned(),
+        };
+        let mut adapter = GenericWsAdapter::new("kraken-futures", conn, ws_cfg, None)
+            .expect("adapter creation succeeds");
+        adapter
+            .instrument_map
+            .insert("PF_XBTUSD".to_owned(), "BTC/USD".to_owned());
+        adapter
+            .instrument_map
+            .insert("PF_ETHUSD".to_owned(), "ETH/USD".to_owned());
+        adapter
+    }
+
+    #[test]
+    fn test_kraken_futures_parse_trade_fill_yields_trade_only() {
+        let adapter = make_kraken_futures_adapter();
+        let msg = r#"{
+            "feed": "trade",
+            "product_id": "PF_XBTUSD",
+            "uid": "05af78ac-a774-478c-a50c-8b9c234e071e",
+            "side": "buy",
+            "type": "fill",
+            "seq": 655508,
+            "time": 1700000000123,
+            "qty": 440,
+            "price": 42000.5
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data_type, MarketDataType::Trade);
+    }
+
+    #[test]
+    fn test_kraken_futures_parse_trade_liquidation_yields_both_trade_and_liquidation() {
+        let adapter = make_kraken_futures_adapter();
+        let msg = r#"{
+            "feed": "trade",
+            "product_id": "PF_XBTUSD",
+            "uid": "liquid-1",
+            "side": "sell",
+            "type": "liquidation",
+            "seq": 655509,
+            "time": 1700000000200,
+            "qty": 10,
+            "price": 42001.0
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].data_type, MarketDataType::Trade);
+        assert_eq!(events[1].data_type, MarketDataType::Liquidation);
+    }
+
+    #[test]
+    fn test_kraken_futures_parse_ticker_with_funding_yields_both_ticker_and_funding() {
+        let adapter = make_kraken_futures_adapter();
+        let msg = r#"{
+            "feed": "ticker",
+            "product_id": "PF_XBTUSD",
+            "bid": 42000.3,
+            "bid_size": 500,
+            "ask": 42000.7,
+            "ask_size": 300,
+            "last": 42000.5,
+            "time": 1700000000123,
+            "funding_rate": 0.0001,
+            "funding_rate_prediction": 0.00012,
+            "next_funding_rate_time": 1700028800000,
+            "mark_price": 42000.4,
+            "index": 42000.2,
+            "volume": 1234.56,
+            "change": 0.5
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].data_type, MarketDataType::Ticker);
+        assert_eq!(events[1].data_type, MarketDataType::FundingRate);
+        match &events[1].payload {
+            MarketDataPayload::FundingRate(f) => {
+                use rust_decimal_macros::dec;
+                assert_eq!(f.rate, dec!(0.0001));
+                assert_eq!(f.predicted_rate, Some(dec!(0.00012)));
+            }
+            other => panic!("expected FundingRate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_kraken_futures_parse_book_snapshot_uses_object_levels() {
+        let adapter = make_kraken_futures_adapter();
+        let msg = r#"{
+            "feed": "book_snapshot",
+            "product_id": "PF_XBTUSD",
+            "timestamp": 1700000000123,
+            "seq": 42,
+            "bids": [{"price": 42000.0, "qty": 0.5}, {"price": 41999.0, "qty": 1.0}],
+            "asks": [{"price": 42001.0, "qty": 0.3}, {"price": 42002.0, "qty": 0.8}]
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => {
+                assert!(u.is_snapshot);
+                assert_eq!(u.bids.len(), 2);
+                assert_eq!(u.asks.len(), 2);
+            }
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_kraken_futures_parse_book_delta_single_level() {
+        let adapter = make_kraken_futures_adapter();
+        let msg = r#"{
+            "feed": "book",
+            "product_id": "PF_XBTUSD",
+            "side": "buy",
+            "price": 42000.5,
+            "qty": 0.25,
+            "timestamp": 1700000000124,
+            "seq": 43
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => {
+                assert!(!u.is_snapshot);
+                assert_eq!(u.bids.len(), 1);
+                assert!(u.asks.is_empty());
+            }
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_kraken_futures_control_feeds_return_empty() {
+        let adapter = make_kraken_futures_adapter();
+        for msg in [
+            r#"{"feed":"heartbeat"}"#,
+            r#"{"feed":"info","version":1}"#,
+            r#"{"feed":"subscribed_result","product_ids":["PF_XBTUSD"]}"#,
+        ] {
+            let events = adapter.parse_message(msg).expect("parse ok");
+            assert!(events.is_empty(), "control feed produced events: {msg}");
+        }
     }
 }
