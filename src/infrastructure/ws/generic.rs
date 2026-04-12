@@ -157,6 +157,41 @@ impl GenericWsAdapter {
             .cloned()
     }
 
+    /// Intercepts venue-specific control messages (application heartbeats,
+    /// reconnect pings) before the parser sees them.
+    ///
+    /// Returns `true` when the message was consumed as a control frame;
+    /// the caller should `continue` the read loop in that case.
+    async fn intercept_control(&mut self, text: &str) -> Result<bool, VenueError> {
+        if self.venue_id.as_str() != "crypto-com" && self.venue_id.as_str() != "crypto-com-perp" {
+            return Ok(false);
+        }
+        // Crypto.com public/heartbeat — MUST reply with public/respond-heartbeat
+        // carrying the same `id`, otherwise the server drops the connection.
+        let value: serde_json::Value = match serde_json::from_str(text) {
+            Ok(v) => v,
+            Err(_) => return Ok(false),
+        };
+        let method = value.get("method").and_then(|v| v.as_str()).unwrap_or("");
+        if method != "public/heartbeat" {
+            return Ok(false);
+        }
+        let id = value.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+        let response = format!(r#"{{"id":{id},"method":"public/respond-heartbeat"}}"#);
+        let ws = match self.ws.as_mut() {
+            Some(ws) => ws,
+            None => return Ok(true),
+        };
+        ws.send(Message::Text(response.into()))
+            .await
+            .map_err(|e| VenueError::ReceiveFailed {
+                venue: self.venue_id.as_str().to_owned(),
+                reason: format!("heartbeat response failed: {e}"),
+            })?;
+        debug!(venue = %self.venue_id, id = id, "responded to crypto.com heartbeat");
+        Ok(true)
+    }
+
     /// Attempts to parse a JSON message into domain events.
     ///
     /// Dispatches by `venue_id` to venue-specific parsers first; falls back
@@ -178,6 +213,7 @@ impl GenericWsAdapter {
             "bitmex" => return self.parse_bitmex_envelope(&value),
             "bitstamp" => return self.parse_bitstamp_envelope(&value),
             "hyperliquid" => return self.parse_hyperliquid_envelope(&value),
+            "crypto-com" | "crypto-com-perp" => return self.parse_crypto_com_envelope(&value),
             _ => {}
         }
 
@@ -723,6 +759,194 @@ impl GenericWsAdapter {
             }
             _ => Ok(Vec::new()),
         }
+    }
+
+    /// Parses a Crypto.com Exchange v1 data envelope:
+    /// `{"method":"subscribe","result":{"instrument_name":"BTC_USDT","channel":"trade","data":[...]}}`.
+    ///
+    /// Subscribe acks (`method == "subscribe"` with empty/absent `result.data`)
+    /// are ignored silently. Heartbeat control messages are intercepted
+    /// earlier in `intercept_control` and never reach this parser.
+    fn parse_crypto_com_envelope(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        let result = match value.get("result") {
+            Some(r) => r,
+            None => return Ok(Vec::new()),
+        };
+        let channel = result.get("channel").and_then(|v| v.as_str()).unwrap_or("");
+        let instrument_str = match result.get("instrument_name").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return Ok(Vec::new()),
+        };
+        let canonical = match self.lookup_canonical(instrument_str) {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+        let instrument_id =
+            InstrumentId::try_new(instrument_str).map_err(|e| VenueError::ReceiveFailed {
+                venue: self.venue_id.as_str().to_owned(),
+                reason: e.to_string(),
+            })?;
+        let canonical_symbol =
+            CanonicalSymbol::try_new(&canonical).map_err(|e| VenueError::ReceiveFailed {
+                venue: self.venue_id.as_str().to_owned(),
+                reason: e.to_string(),
+            })?;
+        let data_arr = match result.get("data").and_then(|v| v.as_array()) {
+            Some(a) => a,
+            None => return Ok(Vec::new()),
+        };
+
+        let mut events = Vec::new();
+        match channel {
+            "trade" => {
+                for item in data_arr {
+                    let price =
+                        match extract_decimal(item, &["p"]).and_then(|d| Price::try_new(d).ok()) {
+                            Some(p) => p,
+                            None => continue,
+                        };
+                    let quantity = match extract_decimal(item, &["q"])
+                        .and_then(|d| Quantity::try_new(d).ok())
+                    {
+                        Some(q) => q,
+                        None => continue,
+                    };
+                    let side = item
+                        .get("s")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| Side::from_str_loose(s).ok())
+                        .unwrap_or(Side::Buy);
+                    let trade_id = item.get("d").and_then(|v| {
+                        if let Some(s) = v.as_str() {
+                            Some(s.to_owned())
+                        } else {
+                            v.as_u64().map(|n| n.to_string())
+                        }
+                    });
+                    let exchange_ts = item.get("t").and_then(|v| v.as_u64()).map(Timestamp::new);
+
+                    events.push(MarketDataEnvelope {
+                        venue: self.venue_id.clone(),
+                        instrument: instrument_id.clone(),
+                        canonical_symbol: canonical_symbol.clone(),
+                        data_type: MarketDataType::Trade,
+                        received_at: Timestamp::now(),
+                        exchange_timestamp: exchange_ts,
+                        sequence: Sequence::new(0),
+                        payload: MarketDataPayload::Trade(Trade {
+                            price,
+                            quantity,
+                            side,
+                            trade_id,
+                        }),
+                    });
+                }
+            }
+            "ticker" => {
+                if let Some(item) = data_arr.first() {
+                    // Crypto.com: b=bid, k=ask, a=last. Sizes are not shipped
+                    // on the ticker channel; use 0 quantity as placeholder.
+                    let bid_price =
+                        match extract_decimal(item, &["b"]).and_then(|d| Price::try_new(d).ok()) {
+                            Some(p) => p,
+                            None => return Ok(Vec::new()),
+                        };
+                    let ask_price =
+                        match extract_decimal(item, &["k"]).and_then(|d| Price::try_new(d).ok()) {
+                            Some(p) => p,
+                            None => return Ok(Vec::new()),
+                        };
+                    let last_price =
+                        match extract_decimal(item, &["a"]).and_then(|d| Price::try_new(d).ok()) {
+                            Some(p) => p,
+                            None => return Ok(Vec::new()),
+                        };
+                    let zero_qty = Quantity::try_new(Decimal::ZERO).map_err(|e| {
+                        VenueError::ReceiveFailed {
+                            venue: self.venue_id.as_str().to_owned(),
+                            reason: e.to_string(),
+                        }
+                    })?;
+                    let exchange_ts = item.get("t").and_then(|v| v.as_u64()).map(Timestamp::new);
+                    events.push(MarketDataEnvelope {
+                        venue: self.venue_id.clone(),
+                        instrument: instrument_id.clone(),
+                        canonical_symbol: canonical_symbol.clone(),
+                        data_type: MarketDataType::Ticker,
+                        received_at: Timestamp::now(),
+                        exchange_timestamp: exchange_ts,
+                        sequence: Sequence::new(0),
+                        payload: MarketDataPayload::Ticker(Ticker {
+                            bid_price,
+                            bid_qty: zero_qty,
+                            ask_price,
+                            ask_qty: zero_qty,
+                            last_price,
+                        }),
+                    });
+                }
+            }
+            "book" => {
+                if let Some(item) = data_arr.first() {
+                    let bids = parse_price_levels(item, &["bids"]);
+                    let asks = parse_price_levels(item, &["asks"]);
+                    if bids.is_empty() && asks.is_empty() {
+                        return Ok(Vec::new());
+                    }
+                    // Crypto.com book messages are periodic snapshots at the
+                    // configured depth; consumers don't need delta handling.
+                    let exchange_ts = item.get("t").and_then(|v| v.as_u64()).map(Timestamp::new);
+                    events.push(MarketDataEnvelope {
+                        venue: self.venue_id.clone(),
+                        instrument: instrument_id.clone(),
+                        canonical_symbol: canonical_symbol.clone(),
+                        data_type: MarketDataType::L2Orderbook,
+                        received_at: Timestamp::now(),
+                        exchange_timestamp: exchange_ts,
+                        sequence: Sequence::new(0),
+                        payload: MarketDataPayload::L2Update(L2Update {
+                            bids,
+                            asks,
+                            is_snapshot: true,
+                        }),
+                    });
+                }
+            }
+            "funding" => {
+                if let Some(item) = data_arr.first() {
+                    let rate = match extract_decimal(item, &["v"]) {
+                        Some(r) => r,
+                        None => return Ok(Vec::new()),
+                    };
+                    let next_at = item
+                        .get("next_funding_time")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    events.push(MarketDataEnvelope {
+                        venue: self.venue_id.clone(),
+                        instrument: instrument_id.clone(),
+                        canonical_symbol: canonical_symbol.clone(),
+                        data_type: MarketDataType::FundingRate,
+                        received_at: Timestamp::now(),
+                        exchange_timestamp: item
+                            .get("t")
+                            .and_then(|v| v.as_u64())
+                            .map(Timestamp::new),
+                        sequence: Sequence::new(0),
+                        payload: MarketDataPayload::FundingRate(FundingRate {
+                            rate,
+                            predicted_rate: None,
+                            next_funding_at: Timestamp::new(next_at),
+                        }),
+                    });
+                }
+            }
+            _ => {}
+        }
+        Ok(events)
     }
 
     /// Parses a Binance combined stream message.
@@ -1697,6 +1921,11 @@ impl VenueAdapter for GenericWsAdapter {
 
                 match msg_result {
                     Some(Ok(Message::Text(text))) => {
+                        // Some venues require an application-level heartbeat
+                        // response. Intercept them before parsing.
+                        if self.intercept_control(&text).await? {
+                            continue;
+                        }
                         let events = self.parse_message(&text)?;
                         if !events.is_empty() {
                             self.circuit_breaker.record_success();
@@ -1705,6 +1934,9 @@ impl VenueAdapter for GenericWsAdapter {
                     }
                     Some(Ok(Message::Binary(data))) => {
                         if let Ok(text) = std::str::from_utf8(&data) {
+                            if self.intercept_control(text).await? {
+                                continue;
+                            }
                             let events = self.parse_message(text)?;
                             if !events.is_empty() {
                                 self.circuit_breaker.record_success();
@@ -2550,6 +2782,173 @@ mod tests {
     fn test_hyperliquid_unknown_channel_returns_empty() {
         let adapter = make_hyperliquid_adapter();
         let msg = r#"{"channel":"candle","data":{"coin":"BTC"}}"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert!(events.is_empty());
+    }
+
+    fn make_crypto_com_adapter(venue_id: &str) -> GenericWsAdapter {
+        let conn = ConnectionConfig {
+            ws_url: "wss://example.invalid/ws".to_owned(),
+            reconnect_delay_ms: 1000,
+            max_reconnect_delay_ms: 60000,
+            max_reconnect_attempts: 0,
+            ping_interval_secs: 25,
+            pong_timeout_secs: 10,
+        };
+        let mut cm = HashMap::new();
+        cm.insert("trade".to_owned(), "trade".to_owned());
+        cm.insert("ticker".to_owned(), "ticker".to_owned());
+        cm.insert("l2_orderbook".to_owned(), "book".to_owned());
+        cm.insert("funding_rate".to_owned(), "funding".to_owned());
+        let ws_cfg = GenericWsConfig {
+            subscribe_template: None,
+            batch_subscribe_template: None,
+            stream_format: "${channel}.${instrument}".to_owned(),
+            channel_map: cm,
+            message_format: "json".to_owned(),
+        };
+        let mut adapter =
+            GenericWsAdapter::new(venue_id, conn, ws_cfg, None).expect("adapter creation succeeds");
+        adapter
+            .instrument_map
+            .insert("BTC_USDT".to_owned(), "BTC/USDT".to_owned());
+        adapter
+            .instrument_map
+            .insert("ETH_USDT".to_owned(), "ETH/USDT".to_owned());
+        adapter
+            .instrument_map
+            .insert("BTCUSD-PERP".to_owned(), "BTC/USD".to_owned());
+        adapter
+    }
+
+    #[test]
+    fn test_crypto_com_parse_trade_yields_trade() {
+        let adapter = make_crypto_com_adapter("crypto-com");
+        let msg = r#"{
+            "method": "subscribe",
+            "result": {
+                "instrument_name": "BTC_USDT",
+                "subscription": "trade.BTC_USDT",
+                "channel": "trade",
+                "data": [{
+                    "d": "2367400022",
+                    "t": 1700000000123,
+                    "p": "42000.50",
+                    "q": "0.0001",
+                    "s": "BUY",
+                    "i": "BTC_USDT"
+                }]
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::Trade(t) => {
+                assert_eq!(t.side, Side::Buy);
+                assert_eq!(t.trade_id.as_deref(), Some("2367400022"));
+            }
+            other => panic!("expected Trade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_crypto_com_parse_ticker_yields_ticker() {
+        let adapter = make_crypto_com_adapter("crypto-com");
+        let msg = r#"{
+            "method": "subscribe",
+            "result": {
+                "instrument_name": "BTC_USDT",
+                "subscription": "ticker.BTC_USDT",
+                "channel": "ticker",
+                "data": [{
+                    "h": "42500.00",
+                    "l": "41500.00",
+                    "a": "42000.50",
+                    "v": "1234.56",
+                    "vv": "51800000.00",
+                    "c": "0.025",
+                    "b": "42000.30",
+                    "k": "42000.70",
+                    "t": 1700000000123
+                }]
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::Ticker(t) => {
+                use rust_decimal_macros::dec;
+                assert_eq!(t.bid_price.value(), dec!(42000.30));
+                assert_eq!(t.ask_price.value(), dec!(42000.70));
+                assert_eq!(t.last_price.value(), dec!(42000.50));
+            }
+            other => panic!("expected Ticker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_crypto_com_parse_book_yields_snapshot() {
+        let adapter = make_crypto_com_adapter("crypto-com");
+        let msg = r#"{
+            "method": "subscribe",
+            "result": {
+                "instrument_name": "BTC_USDT",
+                "subscription": "book.BTC_USDT.50",
+                "channel": "book",
+                "depth": 50,
+                "data": [{
+                    "bids": [["42000.00","0.5","1"],["41999.00","1.0","2"]],
+                    "asks": [["42001.00","0.3","1"]],
+                    "t": 1700000000123,
+                    "u": 12345678,
+                    "pu": 12345677
+                }]
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => {
+                assert!(u.is_snapshot);
+                assert_eq!(u.bids.len(), 2);
+                assert_eq!(u.asks.len(), 1);
+            }
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_crypto_com_parse_funding_yields_funding_rate() {
+        let adapter = make_crypto_com_adapter("crypto-com-perp");
+        let msg = r#"{
+            "method": "subscribe",
+            "result": {
+                "instrument_name": "BTCUSD-PERP",
+                "subscription": "funding.BTCUSD-PERP",
+                "channel": "funding",
+                "data": [{
+                    "t": 1700000000123,
+                    "v": "0.0001",
+                    "next_funding_time": 1700028800000
+                }]
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::FundingRate(f) => {
+                use rust_decimal_macros::dec;
+                assert_eq!(f.rate, dec!(0.0001));
+                assert_eq!(f.next_funding_at.as_millis(), 1_700_028_800_000);
+            }
+            other => panic!("expected FundingRate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_crypto_com_unknown_channel_returns_empty() {
+        let adapter = make_crypto_com_adapter("crypto-com");
+        let msg = r#"{"method":"subscribe","result":{"instrument_name":"BTC_USDT","channel":"candlestick","data":[]}}"#;
         let events = adapter.parse_message(msg).expect("parse ok");
         assert!(events.is_empty());
     }
