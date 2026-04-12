@@ -124,45 +124,156 @@ impl GenericWsAdapter {
 
     /// Builds subscribe message(s) for the given subscriptions.
     ///
-    /// If `batch_subscribe_template` is set, builds a single message with all streams
-    /// as a JSON array in `${params}`. Otherwise, builds one message per (instrument, channel).
+    /// Behaviour depends on `subscribe_mode`:
+    ///
+    /// - `"per_pair"` (default): if `batch_subscribe_template` is set, builds a single
+    ///   message with all streams as a JSON array in `${params}`. Otherwise, builds one
+    ///   message per (instrument, channel) using `subscribe_template`.
+    ///
+    /// - `"per_channel"`: groups instruments by channel and renders one subscribe frame
+    ///   per channel. The template receives `${channel}` and `${instruments}` (a JSON
+    ///   array of instrument strings).
+    ///
+    /// - `"products_channels"`: collects unique instruments into `${instruments}` and
+    ///   unique channels into `${channels}`, rendering a single frame with both arrays.
     fn build_subscribe_messages(&self, subs: &[Subscription]) -> Vec<String> {
-        // Collect all (instrument, channel) pairs.
-        let mut pairs: Vec<(String, String)> = Vec::new();
+        // Collect all (instrument, channel, data_type_subject) triples.
+        let mut pairs: Vec<(String, String, String)> = Vec::new();
         for sub in subs {
             for dt in &sub.data_types {
+                let dt_subject = dt.as_subject_str().to_owned();
                 let channel_name = self
                     .ws_config
                     .channel_map
                     .get(dt.as_subject_str())
                     .cloned()
-                    .unwrap_or_else(|| dt.as_subject_str().to_owned());
-                pairs.push((sub.instrument.clone(), channel_name));
+                    .unwrap_or_else(|| dt_subject.clone());
+                pairs.push((sub.instrument.clone(), channel_name, dt_subject));
             }
         }
 
+        match self.ws_config.subscribe_mode.as_str() {
+            "per_channel" => self.build_subscribe_per_channel(&pairs),
+            "products_channels" => self.build_subscribe_products_channels(subs, &pairs),
+            _ => self.build_subscribe_per_pair(&pairs),
+        }
+    }
+
+    /// Default `per_pair` subscribe: batch or per-pair template rendering.
+    fn build_subscribe_per_pair(&self, pairs: &[(String, String, String)]) -> Vec<String> {
         if let Some(batch_tpl) = &self.ws_config.batch_subscribe_template {
-            // Build stream names from stream_format, then inject as JSON array.
             let stream_names: Vec<String> = pairs
                 .iter()
-                .map(|(inst, ch)| {
-                    self.ws_config
+                .map(|(inst, ch, dt_subj)| {
+                    let mut name = self
+                        .ws_config
                         .stream_format
                         .replace("${instrument}", inst)
-                        .replace("${channel}", ch)
+                        .replace("${channel}", ch);
+                    if let Some(suffix) = self.ws_config.channel_suffix.get(dt_subj) {
+                        name.push_str(suffix);
+                    }
+                    name
                 })
                 .collect();
-            let params_json = serde_json::to_string(&stream_names).unwrap_or_default();
+            let params_json = if self.ws_config.args_format == "object" {
+                let values: Vec<serde_json::Value> = stream_names
+                    .iter()
+                    .filter_map(|s| match serde_json::from_str::<serde_json::Value>(s) {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            tracing::warn!(
+                                stream_name = %s,
+                                error = %e,
+                                "args_format=\"object\": stream name is not valid JSON, skipping"
+                            );
+                            None
+                        }
+                    })
+                    .collect();
+                serde_json::to_string(&values).unwrap_or_default()
+            } else {
+                serde_json::to_string(&stream_names).unwrap_or_default()
+            };
             vec![batch_tpl.replace("${params}", &params_json)]
         } else if let Some(tpl) = &self.ws_config.subscribe_template {
-            // One message per (instrument, channel) pair.
             pairs
                 .iter()
-                .map(|(inst, ch)| tpl.replace("${instrument}", inst).replace("${channel}", ch))
+                .map(|(inst, ch, _dt_subj)| {
+                    tpl.replace("${instrument}", inst).replace("${channel}", ch)
+                })
                 .collect()
         } else {
             Vec::new()
         }
+    }
+
+    /// `per_channel` subscribe: one frame per channel with `${instruments}` as JSON array.
+    fn build_subscribe_per_channel(&self, pairs: &[(String, String, String)]) -> Vec<String> {
+        let tpl = match &self.ws_config.subscribe_template {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+
+        // Group instruments by channel, preserving insertion order via Vec of seen channels.
+        let mut channel_order: Vec<String> = Vec::new();
+        let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
+        for (inst, ch, _dt_subj) in pairs {
+            let entry = grouped.entry(ch.clone()).or_default();
+            if !entry.contains(inst) {
+                entry.push(inst.clone());
+            }
+            if !channel_order.contains(ch) {
+                channel_order.push(ch.clone());
+            }
+        }
+
+        channel_order
+            .iter()
+            .filter_map(|ch| {
+                let instruments = grouped.get(ch)?;
+                let instruments_json = serde_json::to_string(instruments).unwrap_or_default();
+                Some(
+                    tpl.replace("${channel}", ch)
+                        .replace("${instruments}", &instruments_json),
+                )
+            })
+            .collect()
+    }
+
+    /// `products_channels` subscribe: one frame with `${instruments}` and `${channels}`.
+    fn build_subscribe_products_channels(
+        &self,
+        subs: &[Subscription],
+        pairs: &[(String, String, String)],
+    ) -> Vec<String> {
+        let tpl = match &self.ws_config.batch_subscribe_template {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+
+        // Unique instruments (preserve order).
+        let mut instruments: Vec<String> = Vec::new();
+        for sub in subs {
+            if !instruments.contains(&sub.instrument) {
+                instruments.push(sub.instrument.clone());
+            }
+        }
+
+        // Unique channels (preserve order).
+        let mut channels: Vec<String> = Vec::new();
+        for (_inst, ch, _dt_subj) in pairs {
+            if !channels.contains(ch) {
+                channels.push(ch.clone());
+            }
+        }
+
+        let instruments_json = serde_json::to_string(&instruments).unwrap_or_default();
+        let channels_json = serde_json::to_string(&channels).unwrap_or_default();
+        vec![
+            tpl.replace("${instruments}", &instruments_json)
+                .replace("${channels}", &channels_json),
+        ]
     }
 
     /// Looks up the canonical symbol for an instrument, case-insensitively.
@@ -4521,6 +4632,9 @@ mod tests {
             stream_format: "${channel}.${instrument}".to_owned(),
             channel_map: cm,
             message_format: "json".to_owned(),
+            subscribe_mode: "per_pair".to_owned(),
+            args_format: "string".to_owned(),
+            channel_suffix: HashMap::new(),
         };
         let mut adapter =
             GenericWsAdapter::new(venue_id, conn, ws_cfg, None).expect("adapter creation succeeds");
@@ -4731,6 +4845,9 @@ mod tests {
             stream_format: "${channel}:${instrument}".to_owned(),
             channel_map: cm,
             message_format: "json".to_owned(),
+            subscribe_mode: "per_pair".to_owned(),
+            args_format: "string".to_owned(),
+            channel_suffix: HashMap::new(),
         };
         let mut adapter =
             GenericWsAdapter::new("bitmex", conn, ws_cfg, None).expect("adapter creation succeeds");
@@ -4914,6 +5031,9 @@ mod tests {
             stream_format: "${channel}_${instrument}".to_owned(),
             channel_map: cm,
             message_format: "json".to_owned(),
+            subscribe_mode: "per_pair".to_owned(),
+            args_format: "string".to_owned(),
+            channel_suffix: HashMap::new(),
         };
         let mut adapter = GenericWsAdapter::new("bitstamp", conn, ws_cfg, None)
             .expect("adapter creation succeeds");
@@ -5073,6 +5193,9 @@ mod tests {
             stream_format: "${channel}:${instrument}".to_owned(),
             channel_map: cm,
             message_format: "json".to_owned(),
+            subscribe_mode: "per_pair".to_owned(),
+            args_format: "string".to_owned(),
+            channel_suffix: HashMap::new(),
         };
         let mut adapter = GenericWsAdapter::new("hyperliquid", conn, ws_cfg, None)
             .expect("adapter creation succeeds");
@@ -5210,6 +5333,9 @@ mod tests {
             stream_format: "${channel}.${instrument}".to_owned(),
             channel_map: cm,
             message_format: "json".to_owned(),
+            subscribe_mode: "per_pair".to_owned(),
+            args_format: "string".to_owned(),
+            channel_suffix: HashMap::new(),
         };
         let mut adapter =
             GenericWsAdapter::new(venue_id, conn, ws_cfg, None).expect("adapter creation succeeds");
@@ -5376,6 +5502,9 @@ mod tests {
             stream_format: "${channel}".to_owned(),
             channel_map: cm,
             message_format: "json".to_owned(),
+            subscribe_mode: "per_pair".to_owned(),
+            args_format: "string".to_owned(),
+            channel_suffix: HashMap::new(),
         };
         let mut adapter =
             GenericWsAdapter::new("kraken", conn, ws_cfg, None).expect("adapter creation succeeds");
@@ -5538,6 +5667,9 @@ mod tests {
             stream_format: "${channel}".to_owned(),
             channel_map: cm,
             message_format: "json".to_owned(),
+            subscribe_mode: "per_pair".to_owned(),
+            args_format: "string".to_owned(),
+            channel_suffix: HashMap::new(),
         };
         let mut adapter = GenericWsAdapter::new("kraken-futures", conn, ws_cfg, None)
             .expect("adapter creation succeeds");
@@ -5705,6 +5837,9 @@ mod tests {
             stream_format: "${channel}".to_owned(),
             channel_map: cm,
             message_format: "json".to_owned(),
+            subscribe_mode: "per_pair".to_owned(),
+            args_format: "string".to_owned(),
+            channel_suffix: HashMap::new(),
         };
         let mut adapter =
             GenericWsAdapter::new(venue_id, conn, ws_cfg, None).expect("adapter creation succeeds");
@@ -5889,6 +6024,9 @@ mod tests {
             stream_format: "${channel}".to_owned(),
             channel_map: cm,
             message_format: "json".to_owned(),
+            subscribe_mode: "per_pair".to_owned(),
+            args_format: "string".to_owned(),
+            channel_suffix: HashMap::new(),
         };
         let mut adapter =
             GenericWsAdapter::new(venue_id, conn, ws_cfg, None).expect("adapter creation succeeds");
@@ -6060,6 +6198,9 @@ mod tests {
             stream_format: "${channel}".to_owned(),
             channel_map: cm,
             message_format: "json".to_owned(),
+            subscribe_mode: "per_pair".to_owned(),
+            args_format: "string".to_owned(),
+            channel_suffix: HashMap::new(),
         };
         let mut adapter = GenericWsAdapter::new("coinbase", conn, ws_cfg, None)
             .expect("adapter creation succeeds");
@@ -6218,6 +6359,9 @@ mod tests {
             stream_format: "${channel}".to_owned(),
             channel_map: cm,
             message_format: "json".to_owned(),
+            subscribe_mode: "per_pair".to_owned(),
+            args_format: "string".to_owned(),
+            channel_suffix: HashMap::new(),
         };
         let mut adapter = GenericWsAdapter::new("deribit", conn, ws_cfg, None)
             .expect("adapter creation succeeds");
@@ -6412,6 +6556,9 @@ mod tests {
             stream_format: "${channel}".to_owned(),
             channel_map: cm,
             message_format: "json".to_owned(),
+            subscribe_mode: "per_pair".to_owned(),
+            args_format: "string".to_owned(),
+            channel_suffix: HashMap::new(),
         };
         let mut adapter =
             GenericWsAdapter::new("dydx", conn, ws_cfg, None).expect("adapter creation succeeds");
@@ -6599,6 +6746,9 @@ mod tests {
             stream_format: "${channel}".to_owned(),
             channel_map: cm,
             message_format: "json".to_owned(),
+            subscribe_mode: "per_pair".to_owned(),
+            args_format: "string".to_owned(),
+            channel_suffix: HashMap::new(),
         };
         let mut adapter = GenericWsAdapter::new("bitfinex", conn, ws_cfg, None)
             .expect("adapter creation succeeds");
@@ -6732,5 +6882,74 @@ mod tests {
             .parse_message(r#"[99999, [539206467, 1700000000000, 0.001, 42000.5]]"#)
             .expect("parse ok");
         assert!(events.is_empty());
+    }
+
+    // ── subscribe_mode tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_build_subscribe_per_channel_groups_by_channel() {
+        use crate::application::ports::Subscription;
+
+        let conn = ConnectionConfig {
+            ws_url: "wss://example.invalid/ws".to_owned(),
+            reconnect_delay_ms: 1000,
+            max_reconnect_delay_ms: 60000,
+            max_reconnect_attempts: 0,
+            ping_interval_secs: 30,
+            pong_timeout_secs: 10,
+        };
+        let mut cm = HashMap::new();
+        cm.insert("trade".to_owned(), "trade".to_owned());
+        cm.insert("ticker".to_owned(), "ticker".to_owned());
+        let ws_cfg = GenericWsConfig {
+            subscribe_template: Some(
+                r#"{"method":"subscribe","params":{"channel":"${channel}","symbol":${instruments}}}"#
+                    .to_owned(),
+            ),
+            batch_subscribe_template: None,
+            stream_format: "${channel}".to_owned(),
+            channel_map: cm,
+            message_format: "json".to_owned(),
+            subscribe_mode: "per_channel".to_owned(),
+            args_format: "string".to_owned(),
+            channel_suffix: HashMap::new(),
+        };
+        let adapter =
+            GenericWsAdapter::new("kraken", conn, ws_cfg, None).expect("adapter creation succeeds");
+
+        let subs = vec![
+            Subscription {
+                instrument: "BTC/USD".to_owned(),
+                canonical_symbol: "BTC/USD".to_owned(),
+                data_types: vec![MarketDataType::Trade, MarketDataType::Ticker],
+            },
+            Subscription {
+                instrument: "ETH/USD".to_owned(),
+                canonical_symbol: "ETH/USD".to_owned(),
+                data_types: vec![MarketDataType::Trade, MarketDataType::Ticker],
+            },
+        ];
+
+        let msgs = adapter.build_subscribe_messages(&subs);
+        // Should produce 2 messages: one for "trade" channel, one for "ticker" channel.
+        assert_eq!(msgs.len(), 2);
+
+        // First message should be for "trade" with both instruments.
+        let trade_msg: serde_json::Value = serde_json::from_str(&msgs[0]).expect("valid json");
+        assert_eq!(trade_msg["params"]["channel"].as_str(), Some("trade"));
+        let symbols = trade_msg["params"]["symbol"]
+            .as_array()
+            .expect("symbol should be array");
+        assert_eq!(symbols.len(), 2);
+        assert_eq!(symbols[0].as_str(), Some("BTC/USD"));
+        assert_eq!(symbols[1].as_str(), Some("ETH/USD"));
+
+        // Second message should be for "ticker" with both instruments.
+        let ticker_msg: serde_json::Value = serde_json::from_str(&msgs[1]).expect("valid json");
+        assert_eq!(ticker_msg["params"]["channel"].as_str(), Some("ticker"));
+        let symbols = ticker_msg["params"]["symbol"]
+            .as_array()
+            .expect("symbol should be array");
+        assert_eq!(symbols.len(), 2);
     }
 }

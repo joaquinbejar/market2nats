@@ -100,6 +100,7 @@ half_open_max_requests = 2
 [venues.generic_ws]
 # Target shape: per-channel subscribe frames with "params" object.
 # One frame per channel, applied to all subscribed symbols.
+subscribe_mode = "per_channel"
 subscribe_template = '{"method":"subscribe","params":{"channel":"${channel}","symbol":${instruments}}}'
 stream_format = "${channel}"
 message_format = "json"

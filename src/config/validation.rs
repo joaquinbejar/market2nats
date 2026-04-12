@@ -213,6 +213,23 @@ fn validate_venues(venues: &[super::model::VenueConfig], errors: &mut Vec<Config
                 venue.id
             )));
         }
+
+        if let Some(ref gws) = venue.generic_ws {
+            if !["per_pair", "per_channel", "products_channels"]
+                .contains(&gws.subscribe_mode.as_str())
+            {
+                errors.push(ConfigValidationError::Rule(format!(
+                    "venues[{i}] ({}).generic_ws.subscribe_mode must be \"per_pair\", \"per_channel\", or \"products_channels\", got \"{}\"",
+                    venue.id, gws.subscribe_mode
+                )));
+            }
+            if !["string", "object"].contains(&gws.args_format.as_str()) {
+                errors.push(ConfigValidationError::Rule(format!(
+                    "venues[{i}] ({}).generic_ws.args_format must be \"string\" or \"object\", got \"{}\"",
+                    venue.id, gws.args_format
+                )));
+            }
+        }
     }
 }
 
