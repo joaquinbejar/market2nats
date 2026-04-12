@@ -1,0 +1,169 @@
+#
+# market2nats — Crypto.com Exchange (spot + perpetuals)
+#
+# Drop-in profile. Crypto.com Exchange v1 public WebSocket uses a batch
+# subscribe with string-form "channel.instrument" args wrapped in a params
+# object — the generic_ws batch_subscribe_template handles this shape.
+#
+# Endpoints:
+#   - Public  : wss://stream.crypto.com/exchange/v1/market
+#
+# Subscribe shape:
+#   {"id":1,"method":"subscribe","params":{"channels":["trade.BTC_USDT","ticker.BTC_USDT"]}}
+#
+# Supported canonical data types on the public market stream:
+#   trade          → trade.{instrument}
+#   ticker         → ticker.{instrument}
+#   l2_orderbook   → book.{instrument}       (depth defaults to 150 on the venue)
+#   funding_rate   → funding.{instrument_PERP}   (perpetual instruments only)
+#   liquidation    → (not on the public v1 market stream — out of scope)
+#
+# NATS subjects produced:
+#   market.crypto-com.btc-usdt.trade|ticker|l2_orderbook
+#   market.crypto-com.eth-usdt.trade|ticker|l2_orderbook
+#   market.crypto-com-perp.btc-usd.trade|ticker|l2_orderbook|funding_rate
+#   market.crypto-com-perp.eth-usd.trade|ticker|l2_orderbook|funding_rate
+
+[service]
+name = "market2nats-crypto-com"
+log_level = "info"
+log_format = "json"
+shutdown_timeout_ms = 5000
+
+[serialization]
+format = "json"
+
+[nats]
+urls = ["nats://localhost:4222"]
+connect_timeout_ms = 5000
+reconnect_buffer_size = 8388608
+max_reconnects = -1
+ping_interval_secs = 20
+auth = "userpass"
+username = "${NATS_USER}"
+password = "${NATS_PASSWORD}"
+
+[nats.tls]
+enabled = false
+
+# ── Streams ──────────────────────────────────
+
+[[nats.streams]]
+name = "MARKET_TRADES"
+subjects = ["market.crypto-com.*.trade", "market.crypto-com-perp.*.trade"]
+storage = "file"
+retention = "limits"
+max_age_secs = 86400
+max_bytes = 1073741824
+max_msg_size = 65536
+discard = "old"
+num_replicas = 1
+duplicate_window_secs = 120
+
+[[nats.streams]]
+name = "MARKET_TICKER_CRYPTO_COM"
+subjects = ["market.crypto-com.*.ticker", "market.crypto-com-perp.*.ticker"]
+storage = "memory"
+retention = "limits"
+max_age_secs = 300
+num_replicas = 1
+
+[[nats.streams]]
+name = "MARKET_ORDERBOOK_CRYPTO_COM"
+subjects = ["market.crypto-com.*.l2_orderbook", "market.crypto-com-perp.*.l2_orderbook"]
+storage = "file"
+retention = "limits"
+max_age_secs = 3600
+max_bytes = 5368709120
+num_replicas = 1
+
+[[nats.streams]]
+name = "MARKET_FUNDING_CRYPTO_COM"
+subjects = ["market.crypto-com-perp.*.funding_rate"]
+storage = "file"
+retention = "limits"
+max_age_secs = 604800
+num_replicas = 1
+
+# ── Crypto.com Spot ──────────────────────────
+
+[[venues]]
+id = "crypto-com"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://stream.crypto.com/exchange/v1/market"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 25
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+batch_subscribe_template = '{"id":1,"method":"subscribe","params":{"channels":${params}}}'
+stream_format = "${channel}.${instrument}"
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "trade"
+ticker = "ticker"
+# book.{instrument}.{depth}: depth in {10, 50, 150}. 50 is a good middle ground.
+l2_orderbook = "book"
+
+[[venues.subscriptions]]
+instrument = "BTC_USDT"
+canonical_symbol = "BTC/USDT"
+data_types = ["trade", "ticker", "l2_orderbook"]
+
+[[venues.subscriptions]]
+instrument = "ETH_USDT"
+canonical_symbol = "ETH/USDT"
+data_types = ["trade", "ticker", "l2_orderbook"]
+
+# ── Crypto.com Perpetual (USD-M) ─────────────
+
+[[venues]]
+id = "crypto-com-perp"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://stream.crypto.com/exchange/v1/market"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 25
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+batch_subscribe_template = '{"id":2,"method":"subscribe","params":{"channels":${params}}}'
+stream_format = "${channel}.${instrument}"
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "trade"
+ticker = "ticker"
+l2_orderbook = "book"
+funding_rate = "funding"
+
+# Perpetual instruments use the "-PERP" suffix on Crypto.com Exchange v1.
+[[venues.subscriptions]]
+instrument = "BTCUSD-PERP"
+canonical_symbol = "BTC/USD"
+data_types = ["trade", "ticker", "l2_orderbook", "funding_rate"]
+
+[[venues.subscriptions]]
+instrument = "ETHUSD-PERP"
+canonical_symbol = "ETH/USD"
+data_types = ["trade", "ticker", "l2_orderbook", "funding_rate"]
