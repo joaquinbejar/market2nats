@@ -1,0 +1,120 @@
+#
+# market2nats — Kraken v2 (spot)
+#
+# Parser-tweak profile. Kraken v2's public WebSocket subscribes with:
+#
+#   {"method":"subscribe","params":{"channel":"trade","symbol":["BTC/USD","ETH/USD"]}}
+#
+# Each subscribe call carries ONE channel and its applicable symbols in
+# a `params` object with object-shaped fields. This is a different shape
+# than flat string-array or product_ids/channels models — requires a small
+# extension to generic_ws.
+#
+# Endpoint: wss://ws.kraken.com/v2
+#
+# Supported canonical data types on Kraken v2 public:
+#   trade          → trade
+#   ticker         → ticker
+#   l2_orderbook   → book        (depths 10/25/100/500/1000)
+#
+# Kraken is spot only on this endpoint. Kraken Futures is a separate
+# product with its own API — covered in the kraken-futures issue.
+#
+# NATS subjects produced:
+#   market.kraken.btc-usd.trade|ticker|l2_orderbook
+#   market.kraken.eth-usd.trade|ticker|l2_orderbook
+
+[service]
+name = "market2nats-kraken"
+log_level = "info"
+log_format = "json"
+shutdown_timeout_ms = 5000
+
+[serialization]
+format = "json"
+
+[nats]
+urls = ["nats://localhost:4222"]
+connect_timeout_ms = 5000
+reconnect_buffer_size = 8388608
+max_reconnects = -1
+ping_interval_secs = 20
+auth = "userpass"
+username = "${NATS_USER}"
+password = "${NATS_PASSWORD}"
+
+[nats.tls]
+enabled = false
+
+# ── Streams ──────────────────────────────────
+
+[[nats.streams]]
+name = "MARKET_TRADES"
+subjects = ["market.kraken.*.trade"]
+storage = "file"
+retention = "limits"
+max_age_secs = 86400
+max_bytes = 1073741824
+max_msg_size = 65536
+discard = "old"
+num_replicas = 1
+duplicate_window_secs = 120
+
+[[nats.streams]]
+name = "MARKET_TICKER_KRAKEN"
+subjects = ["market.kraken.*.ticker"]
+storage = "memory"
+retention = "limits"
+max_age_secs = 300
+num_replicas = 1
+
+[[nats.streams]]
+name = "MARKET_ORDERBOOK_KRAKEN"
+subjects = ["market.kraken.*.l2_orderbook"]
+storage = "file"
+retention = "limits"
+max_age_secs = 3600
+max_bytes = 5368709120
+num_replicas = 1
+
+# ── Kraken v2 Spot ───────────────────────────
+
+[[venues]]
+id = "kraken"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://ws.kraken.com/v2"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 25
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+# Target shape: per-channel subscribe frames with "params" object.
+# One frame per channel, applied to all subscribed symbols.
+subscribe_template = '{"method":"subscribe","params":{"channel":"${channel}","symbol":${instruments}}}'
+stream_format = "${channel}"
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "trade"
+ticker = "ticker"
+l2_orderbook = "book"
+
+[[venues.subscriptions]]
+instrument = "BTC/USD"
+canonical_symbol = "BTC/USD"
+data_types = ["trade", "ticker", "l2_orderbook"]
+
+[[venues.subscriptions]]
+instrument = "ETH/USD"
+canonical_symbol = "ETH/USD"
+data_types = ["trade", "ticker", "l2_orderbook"]
