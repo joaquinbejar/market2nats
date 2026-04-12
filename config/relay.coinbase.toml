@@ -100,8 +100,8 @@ reset_timeout_secs = 60
 half_open_max_requests = 2
 
 [venues.generic_ws]
-# Target shape once the "products_channels" adapter mode lands. A single
-# batch frame with product_ids and channels as separate arrays.
+# Single batch frame with product_ids and channels as separate arrays.
+subscribe_mode = "products_channels"
 batch_subscribe_template = '{"type":"subscribe","product_ids":${instruments},"channels":${channels}}'
 # Coinbase does not use per-pair stream names, so stream_format is a no-op
 # in this mode. Leaving a placeholder here to keep the TOML well-formed.
