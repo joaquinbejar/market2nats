@@ -111,6 +111,13 @@ run-kraken-futures:
 	cargo run --release -- config/relay.kraken-futures.toml
 
 
+# Run the project against Gate.io v4 (spot + USDT perps).
+# Uses subscribe_template (per-frame subscriptions). Native per-channel batching is a follow-up.
+.PHONY: run-gate
+run-gate:
+	cargo run --release -- config/relay.gate.toml
+
+
 .PHONY: fix
 fix:
 	cargo fix --allow-staged --allow-dirty
