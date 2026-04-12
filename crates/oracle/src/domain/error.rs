@@ -36,6 +36,14 @@ pub enum OracleError {
     /// An error propagated from the underlying domain layer.
     #[error("domain error: {0}")]
     Domain(#[from] market2nats_domain::DomainError),
+
+    /// NATS operation failed.
+    #[error("nats error: {0}")]
+    Nats(String),
+
+    /// Serialization failed.
+    #[error("serialization error: {0}")]
+    Serialization(String),
 }
 
 impl OracleError {
@@ -78,5 +86,21 @@ impl OracleError {
         Self::AllSourcesStale {
             symbol: symbol.into(),
         }
+    }
+
+    /// Creates a `Nats` error.
+    #[cold]
+    #[inline(never)]
+    #[must_use]
+    pub fn nats(message: impl Into<String>) -> Self {
+        Self::Nats(message.into())
+    }
+
+    /// Creates a `Serialization` error.
+    #[cold]
+    #[inline(never)]
+    #[must_use]
+    pub fn serialization(message: impl Into<String>) -> Self {
+        Self::Serialization(message.into())
     }
 }

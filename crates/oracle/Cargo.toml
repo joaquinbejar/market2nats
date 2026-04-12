@@ -10,9 +10,15 @@ repository = "https://github.com/joaquinbejar/market2nats"
 market2nats-domain = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
+async-nats = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+dashmap = { workspace = true }
+bytes = { workspace = true }
+futures-util = { workspace = true }
 
 [dev-dependencies]
 rust_decimal_macros = { workspace = true }
-serde_json = { workspace = true }
