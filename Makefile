@@ -136,6 +136,10 @@ run-deribit:
 run-dydx:
 	cargo run --release -- config/relay.dydx.toml
 
+.PHONY: run-bitfinex
+run-bitfinex:
+	cargo run --release -- config/relay.bitfinex.toml
+
 
 .PHONY: fix
 fix:
