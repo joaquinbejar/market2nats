@@ -104,6 +104,13 @@ run-kraken:
 	cargo run --release -- config/relay.kraken.toml
 
 
+# Run the project against Kraken Futures (USD-margined perpetuals).
+# NOTE: requires the per-channel frame tweak shared with Kraken spot / Gate.io.
+.PHONY: run-kraken-futures
+run-kraken-futures:
+	cargo run --release -- config/relay.kraken-futures.toml
+
+
 .PHONY: fix
 fix:
 	cargo fix --allow-staged --allow-dirty
