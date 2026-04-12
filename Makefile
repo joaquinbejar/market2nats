@@ -91,6 +91,12 @@ run-bitstamp:
 run-hyperliquid:
 	cargo run --release -- config/relay.hyperliquid.toml
 
+# Run the project against Crypto.com Exchange v1 (spot + perpetuals).
+.PHONY: run-crypto-com
+run-crypto-com:
+	cargo run --release -- config/relay.crypto-com.toml
+
+
 .PHONY: fix
 fix:
 	cargo fix --allow-staged --allow-dirty
