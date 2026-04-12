@@ -1,0 +1,48 @@
+[service]
+name = "oracle"
+log_level = "info"
+log_format = "json"
+
+[nats]
+urls = ["nats://localhost:4222"]
+auth = "none"
+
+[[subscriptions]]
+symbol = "BTC/USDT"
+subjects = [
+  "market.binance.btc-usdt.trade",
+  "market.bybit.btc-usdt.trade",
+  "market.bitmex.btc-usdt.trade",
+  "market.bitstamp.btc-usdt.trade",
+  "market.hyperliquid.btc-usdt.trade",
+  "market.crypto-com.btc-usdt.trade",
+  "market.gate-io.btc-usdt.trade",
+  "market.dydx.btc-usdt.trade",
+  "market.bitfinex.btc-usdt.trade",
+]
+
+[[subscriptions]]
+symbol = "ETH/USDT"
+subjects = [
+  "market.binance.eth-usdt.trade",
+  "market.bybit.eth-usdt.trade",
+  "market.bitmex.eth-usdt.trade",
+  "market.bitstamp.eth-usdt.trade",
+  "market.hyperliquid.eth-usdt.trade",
+  "market.crypto-com.eth-usdt.trade",
+  "market.gate-io.eth-usdt.trade",
+  "market.dydx.eth-usdt.trade",
+  "market.bitfinex.eth-usdt.trade",
+]
+
+[pipeline]
+strategy = "median_filtered"
+staleness_max_ms = 10000
+outlier_max_deviation_bps = 100
+min_sources = 3
+twap_window_ms = 30000
+
+[publish]
+subject_pattern = "oracle.<symbol_normalized>"
+format = "json"
+publish_interval_ms = 1000

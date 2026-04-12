@@ -6,6 +6,10 @@ description = "Aggregated oracle price computation from multi-venue trade data"
 license = "MIT"
 repository = "https://github.com/joaquinbejar/market2nats"
 
+[[bin]]
+name = "oracle"
+path = "src/main.rs"
+
 [dependencies]
 market2nats-domain = { workspace = true }
 rust_decimal = { workspace = true }
@@ -16,9 +20,13 @@ toml = { workspace = true }
 async-nats = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 dashmap = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+axum = { workspace = true }
 
 [dev-dependencies]
 rust_decimal_macros = { workspace = true }
