@@ -216,6 +216,7 @@ impl GenericWsAdapter {
             "crypto-com" | "crypto-com-perp" => return self.parse_crypto_com_envelope(&value),
             "kraken" => return self.parse_kraken_envelope(&value),
             "kraken-futures" => return self.parse_kraken_futures_envelope(&value),
+            "gate" | "gate-futures" => return self.parse_gate_envelope(&value),
             _ => {}
         }
 
@@ -1484,6 +1485,426 @@ impl GenericWsAdapter {
                 quantity,
             }),
         }))
+    }
+
+    /// Parses a Gate.io v4 public envelope:
+    /// `{"channel":"spot.trades","event":"update","result":{...}}`.
+    ///
+    /// Subscribe/ack events (`event == "subscribe"` without a `result` body)
+    /// and heartbeats return empty. `futures.tickers` updates emit both a
+    /// [`MarketDataType::Ticker`] and a [`MarketDataType::FundingRate`] when
+    /// `funding_rate` is present.
+    fn parse_gate_envelope(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        let channel = match value.get("channel").and_then(|v| v.as_str()) {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+        let event = value.get("event").and_then(|v| v.as_str()).unwrap_or("");
+        if event != "update" && event != "all" {
+            // Ignore subscribe acks, unsubscribe, etc.
+            return Ok(Vec::new());
+        }
+        let result = match value.get("result") {
+            Some(r) => r,
+            None => return Ok(Vec::new()),
+        };
+
+        match channel {
+            "spot.trades" => self.build_gate_spot_trade(result),
+            "spot.book_ticker" => self.build_gate_spot_book_ticker(result),
+            "spot.order_book_update" => self.build_gate_spot_orderbook(result),
+            "futures.trades" => self.build_gate_futures_trades(result),
+            "futures.book_ticker" => self.build_gate_futures_book_ticker(result),
+            "futures.order_book_update" => self.build_gate_futures_orderbook(result),
+            "futures.tickers" => self.build_gate_futures_tickers_with_funding(result),
+            "futures.liquidates" => self.build_gate_futures_liquidations(result),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn resolve_gate_instrument(
+        &self,
+        instrument_str: &str,
+    ) -> Option<(InstrumentId, CanonicalSymbol)> {
+        let canonical = self.lookup_canonical(instrument_str)?;
+        let instrument_id = InstrumentId::try_new(instrument_str).ok()?;
+        let canonical_symbol = CanonicalSymbol::try_new(&canonical).ok()?;
+        Some((instrument_id, canonical_symbol))
+    }
+
+    fn build_gate_spot_trade(
+        &self,
+        result: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        let instrument_str = match result.get("currency_pair").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return Ok(Vec::new()),
+        };
+        let (instrument, canonical) = match self.resolve_gate_instrument(instrument_str) {
+            Some(x) => x,
+            None => return Ok(Vec::new()),
+        };
+        let price = match extract_decimal(result, &["price"]).and_then(|d| Price::try_new(d).ok()) {
+            Some(p) => p,
+            None => return Ok(Vec::new()),
+        };
+        let quantity =
+            match extract_decimal(result, &["amount"]).and_then(|d| Quantity::try_new(d).ok()) {
+                Some(q) => q,
+                None => return Ok(Vec::new()),
+            };
+        let side = result
+            .get("side")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Side::from_str_loose(s).ok())
+            .unwrap_or(Side::Buy);
+        let trade_id = result.get("id").and_then(|v| {
+            if let Some(s) = v.as_str() {
+                Some(s.to_owned())
+            } else {
+                v.as_u64().map(|n| n.to_string())
+            }
+        });
+        let exchange_ts = result
+            .get("create_time")
+            .and_then(|v| v.as_u64())
+            .and_then(|s| s.checked_mul(1000))
+            .map(Timestamp::new);
+        Ok(vec![MarketDataEnvelope {
+            venue: self.venue_id.clone(),
+            instrument,
+            canonical_symbol: canonical,
+            data_type: MarketDataType::Trade,
+            received_at: Timestamp::now(),
+            exchange_timestamp: exchange_ts,
+            sequence: Sequence::new(0),
+            payload: MarketDataPayload::Trade(Trade {
+                price,
+                quantity,
+                side,
+                trade_id,
+            }),
+        }])
+    }
+
+    fn build_gate_spot_book_ticker(
+        &self,
+        result: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        let instrument_str = match result.get("s").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return Ok(Vec::new()),
+        };
+        let (instrument, canonical) = match self.resolve_gate_instrument(instrument_str) {
+            Some(x) => x,
+            None => return Ok(Vec::new()),
+        };
+        // Gate.io spot.book_ticker: b=bid, B=bid size, a=ask, A=ask size.
+        let bid_price = match extract_decimal(result, &["b"]).and_then(|d| Price::try_new(d).ok()) {
+            Some(p) => p,
+            None => return Ok(Vec::new()),
+        };
+        let bid_qty = match extract_decimal(result, &["B"]).and_then(|d| Quantity::try_new(d).ok())
+        {
+            Some(q) => q,
+            None => return Ok(Vec::new()),
+        };
+        let ask_price = match extract_decimal(result, &["a"]).and_then(|d| Price::try_new(d).ok()) {
+            Some(p) => p,
+            None => return Ok(Vec::new()),
+        };
+        let ask_qty = match extract_decimal(result, &["A"]).and_then(|d| Quantity::try_new(d).ok())
+        {
+            Some(q) => q,
+            None => return Ok(Vec::new()),
+        };
+        let last_price = bid_price
+            .value()
+            .checked_add(ask_price.value())
+            .and_then(|sum| sum.checked_div(Decimal::TWO))
+            .and_then(|mid| Price::try_new(mid).ok());
+        let last_price = match last_price {
+            Some(p) => p,
+            None => return Ok(Vec::new()),
+        };
+        Ok(vec![MarketDataEnvelope {
+            venue: self.venue_id.clone(),
+            instrument,
+            canonical_symbol: canonical,
+            data_type: MarketDataType::Ticker,
+            received_at: Timestamp::now(),
+            exchange_timestamp: result.get("t").and_then(|v| v.as_u64()).map(Timestamp::new),
+            sequence: Sequence::new(0),
+            payload: MarketDataPayload::Ticker(Ticker {
+                bid_price,
+                bid_qty,
+                ask_price,
+                ask_qty,
+                last_price,
+            }),
+        }])
+    }
+
+    fn build_gate_spot_orderbook(
+        &self,
+        result: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        let instrument_str = match result.get("s").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return Ok(Vec::new()),
+        };
+        let (instrument, canonical) = match self.resolve_gate_instrument(instrument_str) {
+            Some(x) => x,
+            None => return Ok(Vec::new()),
+        };
+        let bids = parse_price_levels(result, &["b"]);
+        let asks = parse_price_levels(result, &["a"]);
+        if bids.is_empty() && asks.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![MarketDataEnvelope {
+            venue: self.venue_id.clone(),
+            instrument,
+            canonical_symbol: canonical,
+            data_type: MarketDataType::L2Orderbook,
+            received_at: Timestamp::now(),
+            exchange_timestamp: result.get("t").and_then(|v| v.as_u64()).map(Timestamp::new),
+            sequence: Sequence::new(0),
+            payload: MarketDataPayload::L2Update(L2Update {
+                bids,
+                asks,
+                is_snapshot: false,
+            }),
+        }])
+    }
+
+    fn build_gate_futures_trades(
+        &self,
+        result: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        let arr = match result.as_array() {
+            Some(a) => a,
+            None => return Ok(Vec::new()),
+        };
+        let mut events = Vec::with_capacity(arr.len());
+        for item in arr {
+            let instrument_str = match item.get("contract").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => continue,
+            };
+            let (instrument, canonical) = match self.resolve_gate_instrument(instrument_str) {
+                Some(x) => x,
+                None => continue,
+            };
+            let price = match extract_decimal(item, &["price"]).and_then(|d| Price::try_new(d).ok())
+            {
+                Some(p) => p,
+                None => continue,
+            };
+            // Gate futures trades ship size as a signed i64 for futures; use abs.
+            let raw_size = match extract_decimal(item, &["size"]) {
+                Some(s) => s,
+                None => continue,
+            };
+            let abs_size = raw_size.abs();
+            let quantity = match Quantity::try_new(abs_size) {
+                Ok(q) => q,
+                Err(_) => continue,
+            };
+            // Positive size → buy aggressor on Gate.io futures; negative → sell.
+            let side = if raw_size.is_sign_negative() {
+                Side::Sell
+            } else {
+                Side::Buy
+            };
+            let trade_id = item.get("id").and_then(|v| {
+                if let Some(s) = v.as_str() {
+                    Some(s.to_owned())
+                } else {
+                    v.as_u64().map(|n| n.to_string())
+                }
+            });
+            events.push(MarketDataEnvelope {
+                venue: self.venue_id.clone(),
+                instrument,
+                canonical_symbol: canonical,
+                data_type: MarketDataType::Trade,
+                received_at: Timestamp::now(),
+                exchange_timestamp: item
+                    .get("create_time_ms")
+                    .and_then(|v| v.as_u64())
+                    .map(Timestamp::new),
+                sequence: Sequence::new(0),
+                payload: MarketDataPayload::Trade(Trade {
+                    price,
+                    quantity,
+                    side,
+                    trade_id,
+                }),
+            });
+        }
+        Ok(events)
+    }
+
+    fn build_gate_futures_book_ticker(
+        &self,
+        result: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        let instrument_str = match result.get("s").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return Ok(Vec::new()),
+        };
+        self.build_gate_spot_book_ticker(&serde_json::json!({
+            "s": instrument_str,
+            "b": result.get("b"),
+            "B": result.get("B"),
+            "a": result.get("a"),
+            "A": result.get("A"),
+            "t": result.get("t")
+        }))
+    }
+
+    fn build_gate_futures_orderbook(
+        &self,
+        result: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        // Gate futures.order_book_update uses the same shape as spot.
+        self.build_gate_spot_orderbook(result)
+    }
+
+    fn build_gate_futures_tickers_with_funding(
+        &self,
+        result: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        let arr = match result.as_array() {
+            Some(a) => a,
+            None => return Ok(Vec::new()),
+        };
+        let mut events = Vec::new();
+        for item in arr {
+            let instrument_str = match item.get("contract").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => continue,
+            };
+            let (instrument, canonical) = match self.resolve_gate_instrument(instrument_str) {
+                Some(x) => x,
+                None => continue,
+            };
+            // Ticker — Gate.io futures.tickers has no bid/ask in the stream;
+            // use `last` for bid/ask/last and zero size. This is a known gap
+            // until the spot.book_ticker cross-tap lands.
+            if let Some(last) =
+                extract_decimal(item, &["last"]).and_then(|d| Price::try_new(d).ok())
+            {
+                let zero_qty =
+                    Quantity::try_new(Decimal::ZERO).map_err(|e| VenueError::ReceiveFailed {
+                        venue: self.venue_id.as_str().to_owned(),
+                        reason: e.to_string(),
+                    })?;
+                events.push(MarketDataEnvelope {
+                    venue: self.venue_id.clone(),
+                    instrument: instrument.clone(),
+                    canonical_symbol: canonical.clone(),
+                    data_type: MarketDataType::Ticker,
+                    received_at: Timestamp::now(),
+                    exchange_timestamp: None,
+                    sequence: Sequence::new(0),
+                    payload: MarketDataPayload::Ticker(Ticker {
+                        bid_price: last,
+                        bid_qty: zero_qty,
+                        ask_price: last,
+                        ask_qty: zero_qty,
+                        last_price: last,
+                    }),
+                });
+            }
+            // Funding tap.
+            if let Some(rate) = extract_decimal(item, &["funding_rate"]) {
+                let next_funding_at = item
+                    .get("funding_next_apply")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|s| s.checked_mul(1000))
+                    .unwrap_or(0);
+                events.push(MarketDataEnvelope {
+                    venue: self.venue_id.clone(),
+                    instrument,
+                    canonical_symbol: canonical,
+                    data_type: MarketDataType::FundingRate,
+                    received_at: Timestamp::now(),
+                    exchange_timestamp: None,
+                    sequence: Sequence::new(0),
+                    payload: MarketDataPayload::FundingRate(FundingRate {
+                        rate,
+                        predicted_rate: None,
+                        next_funding_at: Timestamp::new(next_funding_at),
+                    }),
+                });
+            }
+        }
+        Ok(events)
+    }
+
+    fn build_gate_futures_liquidations(
+        &self,
+        result: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        let arr = match result.as_array() {
+            Some(a) => a,
+            None => return Ok(Vec::new()),
+        };
+        let mut events = Vec::with_capacity(arr.len());
+        for item in arr {
+            let instrument_str = match item.get("contract").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => continue,
+            };
+            let (instrument, canonical) = match self.resolve_gate_instrument(instrument_str) {
+                Some(x) => x,
+                None => continue,
+            };
+            let price =
+                match extract_decimal(item, &["fill_price"]).and_then(|d| Price::try_new(d).ok()) {
+                    Some(p) => p,
+                    None => continue,
+                };
+            let raw_size = match extract_decimal(item, &["size"]) {
+                Some(s) => s,
+                None => continue,
+            };
+            let quantity = match Quantity::try_new(raw_size.abs()) {
+                Ok(q) => q,
+                Err(_) => continue,
+            };
+            // Positive size = long liquidation (SELL side being liquidated
+            // aggressively); negative = short liquidation. Convention
+            // documented in the venue issue.
+            let side = if raw_size.is_sign_negative() {
+                Side::Sell
+            } else {
+                Side::Buy
+            };
+            events.push(MarketDataEnvelope {
+                venue: self.venue_id.clone(),
+                instrument,
+                canonical_symbol: canonical,
+                data_type: MarketDataType::Liquidation,
+                received_at: Timestamp::now(),
+                exchange_timestamp: item
+                    .get("time_ms")
+                    .and_then(|v| v.as_u64())
+                    .map(Timestamp::new),
+                sequence: Sequence::new(0),
+                payload: MarketDataPayload::Liquidation(Liquidation {
+                    side,
+                    price,
+                    quantity,
+                }),
+            });
+        }
+        Ok(events)
     }
 
     /// Parses a Binance combined stream message.
@@ -3836,5 +4257,190 @@ mod tests {
             let events = adapter.parse_message(msg).expect("parse ok");
             assert!(events.is_empty(), "control feed produced events: {msg}");
         }
+    }
+
+    fn make_gate_adapter(venue_id: &str) -> GenericWsAdapter {
+        let conn = ConnectionConfig {
+            ws_url: "wss://example.invalid/ws".to_owned(),
+            reconnect_delay_ms: 1000,
+            max_reconnect_delay_ms: 60000,
+            max_reconnect_attempts: 0,
+            ping_interval_secs: 25,
+            pong_timeout_secs: 10,
+        };
+        let mut cm = HashMap::new();
+        cm.insert("trade".to_owned(), "spot.trades".to_owned());
+        cm.insert("ticker".to_owned(), "spot.book_ticker".to_owned());
+        cm.insert(
+            "l2_orderbook".to_owned(),
+            "spot.order_book_update".to_owned(),
+        );
+        let ws_cfg = GenericWsConfig {
+            subscribe_template: None,
+            batch_subscribe_template: None,
+            stream_format: "${channel}".to_owned(),
+            channel_map: cm,
+            message_format: "json".to_owned(),
+        };
+        let mut adapter =
+            GenericWsAdapter::new(venue_id, conn, ws_cfg, None).expect("adapter creation succeeds");
+        adapter
+            .instrument_map
+            .insert("BTC_USDT".to_owned(), "BTC/USDT".to_owned());
+        adapter
+            .instrument_map
+            .insert("ETH_USDT".to_owned(), "ETH/USDT".to_owned());
+        adapter
+    }
+
+    #[test]
+    fn test_gate_parse_spot_trade_yields_trade() {
+        let adapter = make_gate_adapter("gate");
+        let msg = r#"{
+            "time": 1700000000,
+            "channel": "spot.trades",
+            "event": "update",
+            "result": {
+                "id": 309143071,
+                "create_time": 1700000000,
+                "create_time_ms": "1700000000123.456",
+                "side": "sell",
+                "currency_pair": "BTC_USDT",
+                "amount": "0.001",
+                "price": "42000.5"
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::Trade(t) => {
+                assert_eq!(t.side, Side::Sell);
+                assert_eq!(t.trade_id.as_deref(), Some("309143071"));
+            }
+            other => panic!("expected Trade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_gate_parse_spot_orderbook_yields_delta() {
+        let adapter = make_gate_adapter("gate");
+        let msg = r#"{
+            "time": 1700000000,
+            "channel": "spot.order_book_update",
+            "event": "update",
+            "result": {
+                "t": 1700000000123,
+                "e": "depthUpdate",
+                "s": "BTC_USDT",
+                "U": 42345678,
+                "u": 42345681,
+                "b": [["42000.0", "0.5"]],
+                "a": [["42001.0", "0.3"]]
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => {
+                assert!(!u.is_snapshot);
+                assert_eq!(u.bids.len(), 1);
+                assert_eq!(u.asks.len(), 1);
+            }
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_gate_parse_futures_tickers_emits_ticker_and_funding() {
+        let adapter = make_gate_adapter("gate-futures");
+        let msg = r#"{
+            "time": 1700000000,
+            "channel": "futures.tickers",
+            "event": "update",
+            "result": [{
+                "contract": "BTC_USDT",
+                "last": "42000.5",
+                "change_percentage": "0.25",
+                "funding_rate": "0.0001",
+                "funding_next_apply": 1700028800,
+                "mark_price": "42000.4",
+                "index_price": "42000.2"
+            }]
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].data_type, MarketDataType::Ticker);
+        assert_eq!(events[1].data_type, MarketDataType::FundingRate);
+        match &events[1].payload {
+            MarketDataPayload::FundingRate(f) => {
+                use rust_decimal_macros::dec;
+                assert_eq!(f.rate, dec!(0.0001));
+                // funding_next_apply seconds × 1000 → epoch millis.
+                assert_eq!(f.next_funding_at.as_millis(), 1_700_028_800_000);
+            }
+            other => panic!("expected FundingRate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_gate_parse_futures_liquidates_yields_liquidation() {
+        let adapter = make_gate_adapter("gate-futures");
+        let msg = r#"{
+            "time": 1700000000,
+            "channel": "futures.liquidates",
+            "event": "update",
+            "result": [{
+                "contract": "BTC_USDT",
+                "time": 1700000000,
+                "time_ms": 1700000000123,
+                "left": 0,
+                "size": -10,
+                "fill_price": "42000.5",
+                "order_id": 12345
+            }]
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::Liquidation(l) => {
+                // Negative size → short liquidation, side documented as SELL.
+                assert_eq!(l.side, Side::Sell);
+            }
+            other => panic!("expected Liquidation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_gate_parse_futures_trades_yields_trade() {
+        let adapter = make_gate_adapter("gate-futures");
+        let msg = r#"{
+            "time": 1700000000,
+            "channel": "futures.trades",
+            "event": "update",
+            "result": [{
+                "contract": "BTC_USDT",
+                "id": 12345,
+                "create_time": 1700000000,
+                "create_time_ms": 1700000000123,
+                "price": "42000.5",
+                "size": 5
+            }]
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::Trade(t) => {
+                assert_eq!(t.side, Side::Buy);
+            }
+            other => panic!("expected Trade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_gate_subscribe_ack_returns_empty() {
+        let adapter = make_gate_adapter("gate");
+        let msg = r#"{"time":1700000000,"channel":"spot.trades","event":"subscribe","result":{"status":"success"}}"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert!(events.is_empty());
     }
 }
