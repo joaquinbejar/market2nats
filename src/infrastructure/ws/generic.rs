@@ -6992,4 +6992,82 @@ mod tests {
         assert_eq!(args[1]["channel"].as_str(), Some("tickers"));
         assert_eq!(args[1]["instId"].as_str(), Some("BTC-USDT"));
     }
+
+    #[test]
+    fn test_build_subscribe_products_channels_deduplicates() {
+        use crate::application::ports::Subscription;
+
+        let conn = ConnectionConfig {
+            ws_url: "wss://example.invalid/ws".to_owned(),
+            reconnect_delay_ms: 1000,
+            max_reconnect_delay_ms: 60000,
+            max_reconnect_attempts: 0,
+            ping_interval_secs: 30,
+            pong_timeout_secs: 10,
+        };
+        let mut cm = HashMap::new();
+        cm.insert("trade".to_owned(), "matches".to_owned());
+        cm.insert("ticker".to_owned(), "ticker".to_owned());
+        cm.insert("l2_orderbook".to_owned(), "level2_batch".to_owned());
+        let ws_cfg = GenericWsConfig {
+            subscribe_template: None,
+            batch_subscribe_template: Some(
+                r#"{"type":"subscribe","product_ids":${instruments},"channels":${channels}}"#
+                    .to_owned(),
+            ),
+            stream_format: "${channel}".to_owned(),
+            channel_map: cm,
+            message_format: "json".to_owned(),
+            subscribe_mode: "products_channels".to_owned(),
+            args_format: "string".to_owned(),
+            channel_suffix: HashMap::new(),
+        };
+        let adapter = GenericWsAdapter::new("coinbase", conn, ws_cfg, None)
+            .expect("adapter creation succeeds");
+
+        let subs = vec![
+            Subscription {
+                instrument: "BTC-USD".to_owned(),
+                canonical_symbol: "BTC/USD".to_owned(),
+                data_types: vec![
+                    MarketDataType::Trade,
+                    MarketDataType::Ticker,
+                    MarketDataType::L2Orderbook,
+                ],
+            },
+            Subscription {
+                instrument: "ETH-USD".to_owned(),
+                canonical_symbol: "ETH/USD".to_owned(),
+                data_types: vec![
+                    MarketDataType::Trade,
+                    MarketDataType::Ticker,
+                    MarketDataType::L2Orderbook,
+                ],
+            },
+        ];
+
+        let msgs = adapter.build_subscribe_messages(&subs);
+        // Should produce exactly 1 message.
+        assert_eq!(msgs.len(), 1);
+
+        let parsed: serde_json::Value = serde_json::from_str(&msgs[0]).expect("valid json");
+        assert_eq!(parsed["type"].as_str(), Some("subscribe"));
+
+        // product_ids should have 2 unique instruments.
+        let products = parsed["product_ids"]
+            .as_array()
+            .expect("product_ids should be array");
+        assert_eq!(products.len(), 2);
+        assert_eq!(products[0].as_str(), Some("BTC-USD"));
+        assert_eq!(products[1].as_str(), Some("ETH-USD"));
+
+        // channels should have 3 unique channel names.
+        let channels = parsed["channels"]
+            .as_array()
+            .expect("channels should be array");
+        assert_eq!(channels.len(), 3);
+        assert_eq!(channels[0].as_str(), Some("matches"));
+        assert_eq!(channels[1].as_str(), Some("ticker"));
+        assert_eq!(channels[2].as_str(), Some("level2_batch"));
+    }
 }
