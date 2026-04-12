@@ -263,6 +263,23 @@ pub struct GenericWsConfig {
     /// Message format: "json" or "binary".
     #[serde(default = "default_message_format")]
     pub message_format: String,
+    /// Subscribe mode: `"per_pair"` (default) sends one frame per (instrument, channel) pair.
+    /// `"per_channel"` groups by channel and sends one frame per channel with `${instruments}`
+    /// rendered as a JSON array of instrument strings.
+    /// `"products_channels"` collects unique instruments and channels into separate arrays,
+    /// rendering `${instruments}` and `${channels}` in a single frame.
+    #[serde(default = "default_subscribe_mode")]
+    pub subscribe_mode: String,
+    /// Args format for batch subscribe: `"string"` (default) serializes stream names as a
+    /// JSON array of strings. `"object"` parses each stream name as a JSON value and
+    /// serializes the array without double-escaping.
+    #[serde(default = "default_args_format")]
+    pub args_format: String,
+    /// Per-channel suffix appended to stream names after rendering `stream_format`.
+    /// Keys are canonical data-type strings (e.g. `"trade"`, `"l2_orderbook"`), values
+    /// are literal suffixes (e.g. `".raw"`, `".none.20.100ms"`).
+    #[serde(default)]
+    pub channel_suffix: std::collections::HashMap<String, String>,
 }
 
 /// Subscription configuration for a venue instrument.
@@ -417,4 +434,14 @@ fn default_message_format() -> String {
 #[inline]
 fn default_stream_format() -> String {
     "${instrument}@${channel}".to_owned()
+}
+
+#[inline]
+fn default_subscribe_mode() -> String {
+    "per_pair".to_owned()
+}
+
+#[inline]
+fn default_args_format() -> String {
+    "string".to_owned()
 }

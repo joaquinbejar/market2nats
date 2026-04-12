@@ -124,6 +124,7 @@ half_open_max_requests = 2
 
 [venues.generic_ws]
 # Target shape: per-feed frame with product_ids array.
+subscribe_mode = "per_channel"
 subscribe_template = '{"event":"subscribe","feed":"${channel}","product_ids":${instruments}}'
 stream_format = "${channel}"
 message_format = "json"

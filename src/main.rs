@@ -279,6 +279,9 @@ fn create_adapter(
                     stream_format: "${instrument}@${channel}".to_owned(),
                     channel_map: std::collections::HashMap::new(),
                     message_format: "json".to_owned(),
+                    subscribe_mode: "per_pair".to_owned(),
+                    args_format: "string".to_owned(),
+                    channel_suffix: std::collections::HashMap::new(),
                 };
 
                 let adapter = GenericWsAdapter::new(
