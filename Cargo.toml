@@ -3,6 +3,12 @@ name = "market2nats"
 version = "0.1.0"
 edition = "2024"
 description = "WebSocket market data → NATS JetStream relay"
+license = "MIT"
+repository = "https://github.com/joaquinbejar/market2nats"
+homepage = "https://github.com/joaquinbejar/market2nats"
+readme = "README.md"
+keywords = ["market-data", "nats", "websocket", "crypto", "trading"]
+categories = ["finance", "network-programming"]
  
 [dependencies]
 # Async runtime
