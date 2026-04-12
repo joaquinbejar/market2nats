@@ -176,6 +176,7 @@ impl GenericWsAdapter {
         match self.venue_id.as_str() {
             "bybit" | "bybit-linear" => return self.parse_bybit_envelope(&value),
             "bitmex" => return self.parse_bitmex_envelope(&value),
+            "bitstamp" => return self.parse_bitstamp_envelope(&value),
             _ => {}
         }
 
@@ -1185,6 +1186,161 @@ impl GenericWsAdapter {
         }
         Ok(events)
     }
+
+    /// Parses a Bitstamp v2 public stream envelope:
+    /// `{"event":"...","channel":"<kind>_<instrument>","data":{...}}`.
+    ///
+    /// Supported channels:
+    /// - `live_trades_{instrument}`    → [`MarketDataType::Trade`]
+    /// - `diff_order_book_{instrument}` → [`MarketDataType::L2Orderbook`] (delta)
+    /// - `order_book_{instrument}`      → [`MarketDataType::L2Orderbook`] (snapshot)
+    ///
+    /// `bts:error` is logged at WARN; other `bts:` control events are ignored.
+    fn parse_bitstamp_envelope(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        let event = value.get("event").and_then(|v| v.as_str()).unwrap_or("");
+        // Log bts:error at WARN so subscription failures surface; silence other control events.
+        if event == "bts:error" {
+            let msg = value
+                .get("data")
+                .and_then(|v| v.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            warn!(venue = %self.venue_id, error = %msg, "bitstamp subscription error");
+            return Ok(Vec::new());
+        }
+        if event.starts_with("bts:") {
+            return Ok(Vec::new());
+        }
+        let channel = match value.get("channel").and_then(|v| v.as_str()) {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+
+        let (data_type, instrument_str, is_snapshot_channel) =
+            if let Some(rest) = channel.strip_prefix("live_trades_") {
+                (MarketDataType::Trade, rest, false)
+            } else if let Some(rest) = channel.strip_prefix("diff_order_book_") {
+                (MarketDataType::L2Orderbook, rest, false)
+            } else if let Some(rest) = channel.strip_prefix("order_book_") {
+                (MarketDataType::L2Orderbook, rest, true)
+            } else {
+                return Ok(Vec::new());
+            };
+
+        let canonical = match self.lookup_canonical(instrument_str) {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+        let instrument_id =
+            InstrumentId::try_new(instrument_str).map_err(|e| VenueError::ReceiveFailed {
+                venue: self.venue_id.as_str().to_owned(),
+                reason: e.to_string(),
+            })?;
+        let canonical_symbol =
+            CanonicalSymbol::try_new(&canonical).map_err(|e| VenueError::ReceiveFailed {
+                venue: self.venue_id.as_str().to_owned(),
+                reason: e.to_string(),
+            })?;
+
+        let data = match value.get("data") {
+            Some(d) => d,
+            None => return Ok(Vec::new()),
+        };
+
+        match data_type {
+            MarketDataType::Trade => {
+                let price = match extract_decimal(data, &["price_str", "price"])
+                    .and_then(|d| Price::try_new(d).ok())
+                {
+                    Some(p) => p,
+                    None => return Ok(Vec::new()),
+                };
+                let quantity = match extract_decimal(data, &["amount_str", "amount"])
+                    .and_then(|d| Quantity::try_new(d).ok())
+                {
+                    Some(q) => q,
+                    None => return Ok(Vec::new()),
+                };
+                let side = match data.get("type").and_then(|v| v.as_u64()).unwrap_or(0) {
+                    0 => Side::Buy,
+                    _ => Side::Sell,
+                };
+                let trade_id = data.get("id").and_then(|v| {
+                    if let Some(s) = v.as_str() {
+                        Some(s.to_owned())
+                    } else {
+                        v.as_u64().map(|n| n.to_string())
+                    }
+                });
+                // microtimestamp (us string) preferred; fall back to timestamp (s string).
+                let exchange_ts = data
+                    .get("microtimestamp")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .and_then(|us| us.checked_div(1000))
+                    .or_else(|| {
+                        data.get("timestamp")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .and_then(|s| s.checked_mul(1000))
+                    })
+                    .map(Timestamp::new);
+
+                Ok(vec![MarketDataEnvelope {
+                    venue: self.venue_id.clone(),
+                    instrument: instrument_id,
+                    canonical_symbol,
+                    data_type: MarketDataType::Trade,
+                    received_at: Timestamp::now(),
+                    exchange_timestamp: exchange_ts,
+                    sequence: Sequence::new(0),
+                    payload: MarketDataPayload::Trade(Trade {
+                        price,
+                        quantity,
+                        side,
+                        trade_id,
+                    }),
+                }])
+            }
+            MarketDataType::L2Orderbook => {
+                let bids = parse_price_levels(data, &["bids"]);
+                let asks = parse_price_levels(data, &["asks"]);
+                if bids.is_empty() && asks.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let exchange_ts = data
+                    .get("microtimestamp")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .and_then(|us| us.checked_div(1000))
+                    .or_else(|| {
+                        data.get("timestamp")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .and_then(|s| s.checked_mul(1000))
+                    })
+                    .map(Timestamp::new);
+                Ok(vec![MarketDataEnvelope {
+                    venue: self.venue_id.clone(),
+                    instrument: instrument_id,
+                    canonical_symbol,
+                    data_type: MarketDataType::L2Orderbook,
+                    received_at: Timestamp::now(),
+                    exchange_timestamp: exchange_ts,
+                    sequence: Sequence::new(0),
+                    payload: MarketDataPayload::L2Update(L2Update {
+                        bids,
+                        asks,
+                        is_snapshot: is_snapshot_channel,
+                    }),
+                }])
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
 }
 
 impl VenueAdapter for GenericWsAdapter {
@@ -1839,6 +1995,166 @@ mod tests {
     fn test_bitmex_unknown_table_returns_empty() {
         let adapter = make_bitmex_adapter();
         let msg = r#"{"table":"instrument","action":"update","data":[]}"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert!(events.is_empty());
+    }
+
+    // ── Bitstamp ────────────────────────────────────────────────────────
+
+    fn make_bitstamp_adapter() -> GenericWsAdapter {
+        let conn = ConnectionConfig {
+            ws_url: "wss://example.invalid/ws".to_owned(),
+            reconnect_delay_ms: 1000,
+            max_reconnect_delay_ms: 60000,
+            max_reconnect_attempts: 0,
+            ping_interval_secs: 30,
+            pong_timeout_secs: 10,
+        };
+        let mut cm = HashMap::new();
+        cm.insert("trade".to_owned(), "live_trades".to_owned());
+        cm.insert("l2_orderbook".to_owned(), "diff_order_book".to_owned());
+        let ws_cfg = GenericWsConfig {
+            subscribe_template: None,
+            batch_subscribe_template: None,
+            stream_format: "${channel}_${instrument}".to_owned(),
+            channel_map: cm,
+            message_format: "json".to_owned(),
+        };
+        let mut adapter = GenericWsAdapter::new("bitstamp", conn, ws_cfg, None)
+            .expect("adapter creation succeeds");
+        adapter
+            .instrument_map
+            .insert("btcusdt".to_owned(), "BTC/USDT".to_owned());
+        adapter
+            .instrument_map
+            .insert("ethusdt".to_owned(), "ETH/USDT".to_owned());
+        adapter
+    }
+
+    #[test]
+    fn test_bitstamp_parse_trade_buy_yields_trade() {
+        let adapter = make_bitstamp_adapter();
+        let msg = r#"{
+            "event": "trade",
+            "channel": "live_trades_btcusdt",
+            "data": {
+                "id": 312345678,
+                "timestamp": "1700000000",
+                "microtimestamp": "1700000000123456",
+                "amount": 0.1,
+                "amount_str": "0.10000000",
+                "price": 42000.5,
+                "price_str": "42000.50",
+                "type": 0,
+                "buy_order_id": 12345,
+                "sell_order_id": 12346
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.data_type, MarketDataType::Trade);
+        assert_eq!(ev.canonical_symbol.as_str(), "BTC/USDT");
+        assert_eq!(
+            ev.exchange_timestamp.map(|t| t.as_millis()),
+            Some(1_700_000_000_123)
+        );
+        match &ev.payload {
+            MarketDataPayload::Trade(t) => {
+                assert_eq!(t.side, Side::Buy);
+                assert_eq!(t.price.value().to_string(), "42000.50");
+                assert_eq!(t.quantity.value().to_string(), "0.10000000");
+                assert_eq!(t.trade_id.as_deref(), Some("312345678"));
+            }
+            other => panic!("expected Trade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bitstamp_parse_trade_sell_yields_sell_side() {
+        let adapter = make_bitstamp_adapter();
+        let msg = r#"{
+            "event": "trade",
+            "channel": "live_trades_ethusdt",
+            "data": {
+                "id": 1,
+                "microtimestamp": "1700000000000000",
+                "amount_str": "1.0",
+                "price_str": "2000.0",
+                "type": 1
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::Trade(t) => assert_eq!(t.side, Side::Sell),
+            other => panic!("expected Trade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bitstamp_parse_diff_order_book_yields_delta() {
+        let adapter = make_bitstamp_adapter();
+        let msg = r#"{
+            "event": "data",
+            "channel": "diff_order_book_btcusdt",
+            "data": {
+                "timestamp": "1700000000",
+                "microtimestamp": "1700000000123456",
+                "bids": [["42000.50", "0.15"], ["41999.00", "0.10"]],
+                "asks": [["42001.00", "0.05"]]
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => {
+                assert!(!u.is_snapshot);
+                assert_eq!(u.bids.len(), 2);
+                assert_eq!(u.asks.len(), 1);
+            }
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bitstamp_parse_order_book_snapshot_flags_is_snapshot() {
+        let adapter = make_bitstamp_adapter();
+        let msg = r#"{
+            "event": "data",
+            "channel": "order_book_btcusdt",
+            "data": {
+                "timestamp": "1700000000",
+                "microtimestamp": "1700000000000000",
+                "bids": [["42000.00", "0.5"]],
+                "asks": [["42001.00", "0.3"]]
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => assert!(u.is_snapshot),
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bitstamp_control_events_return_empty() {
+        let adapter = make_bitstamp_adapter();
+        for msg in [
+            r#"{"event":"bts:subscription_succeeded","channel":"live_trades_btcusdt","data":{}}"#,
+            r#"{"event":"bts:heartbeat","channel":"","data":{}}"#,
+            r#"{"event":"bts:request_reconnect","channel":"","data":{}}"#,
+        ] {
+            let events = adapter.parse_message(msg).expect("parse ok");
+            assert!(events.is_empty(), "control event produced events: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_bitstamp_unknown_channel_returns_empty() {
+        let adapter = make_bitstamp_adapter();
+        let msg = r#"{"event":"data","channel":"mystery_btcusdt","data":{}}"#;
         let events = adapter.parse_message(msg).expect("parse ok");
         assert!(events.is_empty());
     }

@@ -81,6 +81,11 @@ run-bybit:
 run-bitmex:
 	cargo run --release -- config/relay.bitmex.toml
 
+# Run the project against Bitstamp v2 public WS (spot BTC/ETH).
+.PHONY: run-bitstamp
+run-bitstamp:
+	cargo run --release -- config/relay.bitstamp.toml
+
 .PHONY: fix
 fix:
 	cargo fix --allow-staged --allow-dirty
