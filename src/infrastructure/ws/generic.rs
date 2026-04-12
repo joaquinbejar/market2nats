@@ -283,7 +283,8 @@ impl GenericWsAdapter {
                 }
             }
             MarketDataType::Ticker => {
-                // Data is either an object (snapshot) or an object with partial fields (delta).
+                // Data is an object with bid1Price/bid1Size/ask1Price/ask1Size/lastPrice.
+                // Partial-field deltas are silently skipped; only full updates emit a Ticker.
                 if let Some(ev) =
                     self.build_bybit_ticker(data, &instrument_id, &canonical_symbol, ts)?
                 {

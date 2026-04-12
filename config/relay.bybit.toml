@@ -3,8 +3,8 @@
 #
 # Drop-in profile. Bybit v5 public streams use plain JSON framing, batch
 # subscribe via {"op":"subscribe","args":[...]} and dot-joined topic names
-# ("publicTrade.BTCUSDT"), so the generic_ws adapter handles it with no
-# code changes.
+# ("publicTrade.BTCUSDT"), and are supported by the generic_ws adapter via
+# venue-specific parsing/dispatch in generic_ws.
 #
 # Endpoints:
 #   - Spot   : wss://stream.bybit.com/v5/public/spot
