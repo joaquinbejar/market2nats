@@ -7025,6 +7025,7 @@ mod tests {
         let adapter = GenericWsAdapter::new("coinbase", conn, ws_cfg, None)
             .expect("adapter creation succeeds");
 
+        // Third subscription intentionally duplicates "BTC-USD" to exercise dedup.
         let subs = vec![
             Subscription {
                 instrument: "BTC-USD".to_owned(),
@@ -7044,6 +7045,11 @@ mod tests {
                     MarketDataType::L2Orderbook,
                 ],
             },
+            Subscription {
+                instrument: "BTC-USD".to_owned(),
+                canonical_symbol: "BTC/USD".to_owned(),
+                data_types: vec![MarketDataType::Trade],
+            },
         ];
 
         let msgs = adapter.build_subscribe_messages(&subs);
@@ -7053,7 +7059,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&msgs[0]).expect("valid json");
         assert_eq!(parsed["type"].as_str(), Some("subscribe"));
 
-        // product_ids should have 2 unique instruments.
+        // product_ids should have 2 unique instruments (BTC-USD deduped).
         let products = parsed["product_ids"]
             .as_array()
             .expect("product_ids should be array");
