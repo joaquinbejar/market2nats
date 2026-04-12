@@ -1,8 +1,8 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::enums::{MarketDataType, Side};
-use super::types::{CanonicalSymbol, InstrumentId, Price, Quantity, Sequence, Timestamp, VenueId};
+use crate::enums::{MarketDataType, Side};
+use crate::types::{CanonicalSymbol, InstrumentId, Price, Quantity, Sequence, Timestamp, VenueId};
 
 /// Envelope wrapping all market data events with routing metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -11,6 +11,7 @@ keywords = ["market-data", "nats", "websocket", "crypto", "trading"]
 categories = ["finance", "network-programming"]
 
 [dependencies]
+market2nats-domain = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 async-nats = { workspace = true }
