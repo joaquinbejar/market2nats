@@ -118,6 +118,13 @@ run-gate:
 	cargo run --release -- config/relay.gate.toml
 
 
+# Run the project against OKX (spot + SWAP perps) for BTC and ETH.
+# NOTE: requires the object-args parser tweak to land first; see the OKX venue issue.
+.PHONY: run-okx
+run-okx:
+	cargo run --release -- config/relay.okx.toml
+
+
 .PHONY: fix
 fix:
 	cargo fix --allow-staged --allow-dirty
