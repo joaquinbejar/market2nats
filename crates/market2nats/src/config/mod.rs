@@ -81,6 +81,23 @@ fn substitute_env_vars(input: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Returns the workspace root path (two levels up from CARGO_MANIFEST_DIR).
+    fn workspace_root() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root must exist")
+    }
+
+    /// Resolves a workspace-relative path (e.g. `config/relay.toml`).
+    fn ws_path(relative: &str) -> String {
+        workspace_root()
+            .join(relative)
+            .to_str()
+            .expect("path must be valid UTF-8")
+            .to_owned()
+    }
+
     #[test]
     fn test_substitute_env_vars_replaces() {
         unsafe { std::env::set_var("TEST_MDR_VAR", "hello") };
@@ -97,7 +114,7 @@ mod tests {
 
     #[test]
     fn test_load_config_parses_relay_toml() {
-        let config = load_config("config/relay.toml").unwrap();
+        let config = load_config(&ws_path("config/relay.toml")).unwrap();
         assert_eq!(config.service.name, "market2nats");
         assert!(!config.venues.is_empty());
         assert!(!config.nats.streams.is_empty());
@@ -105,7 +122,7 @@ mod tests {
 
     #[test]
     fn test_load_config_parses_binance_spot_trades_profile() {
-        let config = load_config("config/relay.binance-spot-trades.toml").unwrap();
+        let config = load_config(&ws_path("config/relay.binance-spot-trades.toml")).unwrap();
         assert_eq!(config.venues.len(), 1);
         let venue = &config.venues[0];
         assert_eq!(venue.id, "binance");
@@ -117,7 +134,7 @@ mod tests {
 
     #[test]
     fn test_load_config_parses_bybit_profile() {
-        let config = load_config("config/relay.bybit.toml").unwrap();
+        let config = load_config(&ws_path("config/relay.bybit.toml")).unwrap();
         assert_eq!(config.venues.len(), 2);
         assert_eq!(config.venues[0].id, "bybit");
         assert_eq!(config.venues[1].id, "bybit-linear");

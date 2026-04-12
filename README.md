@@ -13,11 +13,11 @@ WebSocket Feeds ──► Venue Adapters ──► mpsc channels ──► Publi
 
 | Layer | Path | Responsibility |
 |---|---|---|
-| Domain | `src/domain/` | Pure types, enums, value objects. No I/O, no async. |
-| Config | `src/config/` | TOML parsing, validation, env var substitution. |
-| Application | `src/application/` | Orchestration: subscription manager, stream router, sequence tracker, health monitor. |
-| Infrastructure | `src/infrastructure/` | WebSocket adapters, NATS publisher, HTTP health/metrics server. |
-| Serialization | `src/serialization/` | Protobuf (prost) and JSON encoding for market data events. |
+| Domain | `crates/market2nats/src/domain/` | Pure types, enums, value objects. No I/O, no async. |
+| Config | `crates/market2nats/src/config/` | TOML parsing, validation, env var substitution. |
+| Application | `crates/market2nats/src/application/` | Orchestration: subscription manager, stream router, sequence tracker, health monitor. |
+| Infrastructure | `crates/market2nats/src/infrastructure/` | WebSocket adapters, NATS publisher, HTTP health/metrics server. |
+| Serialization | `crates/market2nats/src/serialization/` | Protobuf (prost) and JSON encoding for market data events. |
 
 ## NATS Subject Pattern
 

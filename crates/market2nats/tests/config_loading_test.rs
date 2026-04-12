@@ -6,10 +6,27 @@ use std::io::Write;
 
 use market2nats::config;
 
+/// Returns the workspace root path (two levels up from CARGO_MANIFEST_DIR).
+fn workspace_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root must exist")
+}
+
+/// Resolves a workspace-relative path (e.g. `config/relay.toml`).
+fn ws_path(relative: &str) -> String {
+    workspace_root()
+        .join(relative)
+        .to_str()
+        .expect("path must be valid UTF-8")
+        .to_owned()
+}
+
 /// Test loading the default relay.toml config file.
 #[test]
 fn test_load_default_config() {
-    let result = config::load_config("config/relay.toml");
+    let result = config::load_config(&ws_path("config/relay.toml"));
     assert!(
         result.is_ok(),
         "failed to load relay.toml: {:?}",
@@ -26,7 +43,7 @@ fn test_load_default_config() {
 /// Test that relay.toml venue subscriptions have valid data types.
 #[test]
 fn test_default_config_data_types_valid() {
-    let cfg = config::load_config("config/relay.toml").unwrap();
+    let cfg = config::load_config(&ws_path("config/relay.toml")).unwrap();
 
     for venue in &cfg.venues {
         for sub in &venue.subscriptions {
@@ -47,7 +64,7 @@ fn test_default_config_data_types_valid() {
 /// Test that consumer stream references are valid.
 #[test]
 fn test_default_config_consumer_stream_refs() {
-    let cfg = config::load_config("config/relay.toml").unwrap();
+    let cfg = config::load_config(&ws_path("config/relay.toml")).unwrap();
     let stream_names: Vec<&str> = cfg.nats.streams.iter().map(|s| s.name.as_str()).collect();
 
     for consumer in &cfg.nats.consumers {

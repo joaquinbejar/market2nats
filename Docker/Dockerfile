@@ -4,21 +4,22 @@ RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static protob
 
 WORKDIR /app
 
-# Cache dependencies by copying manifests first.
+# Cache workspace + member manifests, build script, and proto files.
 COPY Cargo.toml Cargo.lock ./
-COPY build.rs ./
-COPY proto/ proto/
+COPY crates/market2nats/Cargo.toml crates/market2nats/Cargo.toml
+COPY crates/market2nats/build.rs   crates/market2nats/build.rs
+COPY crates/market2nats/proto/     crates/market2nats/proto/
 
-# Create a dummy src to build deps.
-RUN mkdir -p src && \
-    echo "fn main() {}" > src/main.rs && \
-    echo "" > src/lib.rs && \
-    cargo build --release 2>/dev/null || true && \
-    rm -rf src
+# Dummy src to cache dependency compilation.
+RUN mkdir -p crates/market2nats/src && \
+    printf 'fn main() {}' > crates/market2nats/src/main.rs && \
+    printf ''              > crates/market2nats/src/lib.rs  && \
+    cargo build --release -p market2nats 2>/dev/null || true && \
+    rm -rf crates/market2nats/src
 
 # Copy real source and build.
-COPY src/ src/
-RUN cargo build --release --bin market2nats
+COPY crates/market2nats/src/ crates/market2nats/src/
+RUN cargo build --release -p market2nats --bin market2nats
 
 # ── Runtime ──────────────────────────────────────────────────────────────
 
