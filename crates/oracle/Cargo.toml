@@ -1,0 +1,17 @@
+[package]
+name = "oracle"
+version = "0.1.0"
+edition.workspace = true
+description = "Aggregated oracle price computation from multi-venue trade data"
+license = "MIT"
+repository = "https://github.com/joaquinbejar/market2nats"
+
+[dependencies]
+market2nats-domain = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+rust_decimal_macros = { workspace = true }
+serde_json = { workspace = true }
