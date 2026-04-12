@@ -128,6 +128,10 @@ run-okx:
 run-coinbase:
 	cargo run --release -- config/relay.coinbase.toml
 
+.PHONY: run-deribit
+run-deribit:
+	cargo run --release -- config/relay.deribit.toml
+
 
 .PHONY: fix
 fix:

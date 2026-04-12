@@ -1,0 +1,154 @@
+#
+# market2nats — Deribit v2 (perpetuals, dated futures, options)
+#
+# Parser-tweak profile. Deribit exposes a JSON-RPC 2.0 WebSocket API;
+# market data subscriptions are made via the public/subscribe method
+# with a params.channels array of fully-qualified channel strings:
+#
+#   {"jsonrpc":"2.0","id":42,"method":"public/subscribe","params":{"channels":["trades.BTC-PERPETUAL.raw","ticker.BTC-PERPETUAL.raw","book.BTC-PERPETUAL.none.20.100ms"]}}
+#
+# The batch_subscribe_template path fits once we wrap with the jsonrpc
+# envelope. Parser tweak is needed because incoming messages arrive as
+# JSON-RPC notifications with method="subscription" and params.channel
+# + params.data, which the generic parser doesn't recognize today.
+#
+# Endpoints:
+#   - Public   : wss://www.deribit.com/ws/api/v2
+#   - Test     : wss://test.deribit.com/ws/api/v2
+#
+# Supported canonical data types on Deribit public:
+#   trade          → trades.{instrument}.raw
+#   ticker         → ticker.{instrument}.raw
+#   l2_orderbook   → book.{instrument}.none.20.100ms   (20 levels, 100ms)
+#   funding_rate   → ticker (tapped: current_funding / funding_8h fields)
+#   liquidation    → (tapped from trades channel via the "liquidation" field
+#                     on trade objects; non-"none" values emit a Liquidation
+#                     envelope in addition to the Trade — see issue
+#                     for details)
+#
+# Instrument IDs:
+#   BTC-PERPETUAL, ETH-PERPETUAL — perps
+#   BTC-{DATE}, ETH-{DATE}       — dated futures
+#   BTC-{DATE}-{STRIKE}-{C|P}    — options
+#
+# NATS subjects produced:
+#   market.deribit.btc-perp.trade|ticker|l2_orderbook|funding_rate|liquidation
+#   market.deribit.eth-perp.trade|ticker|l2_orderbook|funding_rate|liquidation
+
+[service]
+name = "market2nats-deribit"
+log_level = "info"
+log_format = "json"
+shutdown_timeout_ms = 5000
+
+[serialization]
+format = "json"
+
+[nats]
+urls = ["nats://localhost:4222"]
+connect_timeout_ms = 5000
+reconnect_buffer_size = 8388608
+max_reconnects = -1
+ping_interval_secs = 20
+auth = "userpass"
+username = "${NATS_USER}"
+password = "${NATS_PASSWORD}"
+
+[nats.tls]
+enabled = false
+
+# ── Streams ──────────────────────────────────
+
+[[nats.streams]]
+name = "MARKET_TRADES"
+subjects = ["market.deribit.*.trade"]
+storage = "file"
+retention = "limits"
+max_age_secs = 86400
+max_bytes = 1073741824
+max_msg_size = 65536
+discard = "old"
+num_replicas = 1
+duplicate_window_secs = 120
+
+[[nats.streams]]
+name = "MARKET_TICKER_DERIBIT"
+subjects = ["market.deribit.*.ticker"]
+storage = "memory"
+retention = "limits"
+max_age_secs = 300
+num_replicas = 1
+
+[[nats.streams]]
+name = "MARKET_ORDERBOOK_DERIBIT"
+subjects = ["market.deribit.*.l2_orderbook"]
+storage = "file"
+retention = "limits"
+max_age_secs = 3600
+max_bytes = 5368709120
+num_replicas = 1
+
+[[nats.streams]]
+name = "MARKET_FUNDING_DERIBIT"
+subjects = ["market.deribit.*.funding_rate"]
+storage = "file"
+retention = "limits"
+max_age_secs = 604800
+num_replicas = 1
+
+[[nats.streams]]
+name = "MARKET_LIQUIDATIONS_DERIBIT"
+subjects = ["market.deribit.*.liquidation"]
+storage = "file"
+retention = "interest"
+max_age_secs = 86400
+num_replicas = 1
+
+# ── Deribit ──────────────────────────────────
+
+[[venues]]
+id = "deribit"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://www.deribit.com/ws/api/v2"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 30
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+# JSON-RPC wrapping around the channels array.
+batch_subscribe_template = '{"jsonrpc":"2.0","id":42,"method":"public/subscribe","params":{"channels":${params}}}'
+# Deribit channel names are already dot-joined and fully qualified, but
+# the book channel needs suffix "none.20.100ms" appended. Use
+# stream_format that matches the non-book shape by default; the parser
+# tweak must handle the book suffix via channel_suffix_by_type.
+stream_format = "${channel}.${instrument}"
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "trades"
+ticker = "ticker"
+# Shipped as "book" — the parser tweak appends ".none.20.100ms" to form
+# the full channel name "book.BTC-PERPETUAL.none.20.100ms".
+l2_orderbook = "book"
+funding_rate = "ticker"
+liquidation = "trades"
+
+[[venues.subscriptions]]
+instrument = "BTC-PERPETUAL"
+canonical_symbol = "BTC/PERP"
+data_types = ["trade", "ticker", "l2_orderbook", "funding_rate", "liquidation"]
+
+[[venues.subscriptions]]
+instrument = "ETH-PERPETUAL"
+canonical_symbol = "ETH/PERP"
+data_types = ["trade", "ticker", "l2_orderbook", "funding_rate", "liquidation"]
