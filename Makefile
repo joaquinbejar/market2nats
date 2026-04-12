@@ -97,6 +97,13 @@ run-crypto-com:
 	cargo run --release -- config/relay.crypto-com.toml
 
 
+# Run the project against Kraken v2 spot.
+# NOTE: requires the per-channel params object subscribe mode in generic_ws.
+.PHONY: run-kraken
+run-kraken:
+	cargo run --release -- config/relay.kraken.toml
+
+
 .PHONY: fix
 fix:
 	cargo fix --allow-staged --allow-dirty
