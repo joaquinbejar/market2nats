@@ -37,6 +37,8 @@ axum = "0.8"
 # Utilities
 futures-util = "0.3"
 url = "2"
+# Internal crates
+market2nats-domain = { path = "crates/market2nats-domain" }
 # Dev/test
 tokio-test = "0.4"
 reqwest = { version = "0.13", features = ["json"] }

@@ -1161,6 +1161,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "futures-util",
+ "market2nats-domain",
  "metrics",
  "metrics-exporter-prometheus",
  "portpicker",
@@ -1180,6 +1181,17 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "market2nats-domain"
+version = "0.1.0"
+dependencies = [
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

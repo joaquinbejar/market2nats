@@ -3,7 +3,7 @@ use std::fmt;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::error::DomainError;
+use crate::error::DomainError;
 
 /// Identifies a trading venue (e.g., "binance", "kraken").
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
