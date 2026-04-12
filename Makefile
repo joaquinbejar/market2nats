@@ -132,6 +132,10 @@ run-coinbase:
 run-deribit:
 	cargo run --release -- config/relay.deribit.toml
 
+.PHONY: run-dydx
+run-dydx:
+	cargo run --release -- config/relay.dydx.toml
+
 
 .PHONY: fix
 fix:
