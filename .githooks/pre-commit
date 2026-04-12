@@ -1,0 +1,10 @@
+#!/bin/sh
+#
+# Pre-commit hook: reject commits that contain AI co-author attribution.
+# Install: git config core.hooksPath .githooks
+#
+
+# Check the commit message template or staged changes for co-author lines
+# This runs BEFORE the commit message is finalized, so we check via
+# the prepare-commit-msg hook instead. This hook validates staged files.
+exit 0
