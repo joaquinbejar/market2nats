@@ -218,6 +218,7 @@ impl GenericWsAdapter {
             "kraken-futures" => return self.parse_kraken_futures_envelope(&value),
             "gate" | "gate-futures" => return self.parse_gate_envelope(&value),
             "okx" | "okx-swap" => return self.parse_okx_envelope(&value),
+            "coinbase" => return self.parse_coinbase_envelope(&value),
             _ => {}
         }
 
@@ -3049,6 +3050,219 @@ impl GenericWsAdapter {
             _ => Ok(Vec::new()),
         }
     }
+
+    // ── Coinbase Exchange ───────────────────────────────────────────────
+    //
+    // Coinbase WS sends top-level `{"type": "<msg_type>", "product_id": ...}`
+    // with no outer envelope. Key types:
+    //   "match" / "last_match" → Trade
+    //   "ticker"               → Ticker / BBO
+    //   "snapshot"             → L2 full book (is_snapshot = true)
+    //   "l2update"             → incremental changes array
+    //   "subscriptions" / "heartbeat" / "error" / "status" / "auction" → skip
+    fn parse_coinbase_envelope(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        let msg_type = match value.get("type").and_then(|v| v.as_str()) {
+            Some(t) => t,
+            None => return Ok(Vec::new()),
+        };
+        // Control / ack / heartbeat events.
+        if matches!(
+            msg_type,
+            "subscriptions" | "heartbeat" | "error" | "status" | "auction"
+        ) {
+            return Ok(Vec::new());
+        }
+
+        let product_id = match value.get("product_id").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return Ok(Vec::new()),
+        };
+        let canonical = match self.lookup_canonical(product_id) {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+        let instrument_id =
+            InstrumentId::try_new(product_id).map_err(|e| VenueError::ReceiveFailed {
+                venue: self.venue_id.as_str().to_owned(),
+                reason: e.to_string(),
+            })?;
+        let canonical_symbol =
+            CanonicalSymbol::try_new(&canonical).map_err(|e| VenueError::ReceiveFailed {
+                venue: self.venue_id.as_str().to_owned(),
+                reason: e.to_string(),
+            })?;
+
+        match msg_type {
+            "match" | "last_match" => {
+                let price =
+                    match extract_decimal(value, &["price"]).and_then(|d| Price::try_new(d).ok()) {
+                        Some(p) => p,
+                        None => return Ok(Vec::new()),
+                    };
+                let quantity = match extract_decimal(value, &["size"])
+                    .and_then(|d| Quantity::try_new(d).ok())
+                {
+                    Some(q) => q,
+                    None => return Ok(Vec::new()),
+                };
+                let side = value
+                    .get("side")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Side::from_str_loose(s).ok())
+                    .unwrap_or(Side::Buy);
+                let trade_id = value.get("trade_id").and_then(|v| {
+                    if let Some(s) = v.as_str() {
+                        Some(s.to_owned())
+                    } else {
+                        v.as_u64().map(|n| n.to_string())
+                    }
+                });
+                Ok(vec![MarketDataEnvelope {
+                    venue: self.venue_id.clone(),
+                    instrument: instrument_id,
+                    canonical_symbol,
+                    data_type: MarketDataType::Trade,
+                    received_at: Timestamp::now(),
+                    exchange_timestamp: None,
+                    sequence: Sequence::new(0),
+                    payload: MarketDataPayload::Trade(Trade {
+                        price,
+                        quantity,
+                        side,
+                        trade_id,
+                    }),
+                }])
+            }
+            "ticker" => {
+                let bid_price = match extract_decimal(value, &["best_bid"])
+                    .and_then(|d| Price::try_new(d).ok())
+                {
+                    Some(p) => p,
+                    None => return Ok(Vec::new()),
+                };
+                let bid_qty = match extract_decimal(value, &["best_bid_size"])
+                    .and_then(|d| Quantity::try_new(d).ok())
+                {
+                    Some(q) => q,
+                    None => return Ok(Vec::new()),
+                };
+                let ask_price = match extract_decimal(value, &["best_ask"])
+                    .and_then(|d| Price::try_new(d).ok())
+                {
+                    Some(p) => p,
+                    None => return Ok(Vec::new()),
+                };
+                let ask_qty = match extract_decimal(value, &["best_ask_size"])
+                    .and_then(|d| Quantity::try_new(d).ok())
+                {
+                    Some(q) => q,
+                    None => return Ok(Vec::new()),
+                };
+                let last_price =
+                    match extract_decimal(value, &["price"]).and_then(|d| Price::try_new(d).ok()) {
+                        Some(p) => p,
+                        None => return Ok(Vec::new()),
+                    };
+                Ok(vec![MarketDataEnvelope {
+                    venue: self.venue_id.clone(),
+                    instrument: instrument_id,
+                    canonical_symbol,
+                    data_type: MarketDataType::Ticker,
+                    received_at: Timestamp::now(),
+                    exchange_timestamp: None,
+                    sequence: Sequence::new(0),
+                    payload: MarketDataPayload::Ticker(Ticker {
+                        bid_price,
+                        bid_qty,
+                        ask_price,
+                        ask_qty,
+                        last_price,
+                    }),
+                }])
+            }
+            "snapshot" => {
+                let bids = parse_price_levels(value, &["bids"]);
+                let asks = parse_price_levels(value, &["asks"]);
+                if bids.is_empty() && asks.is_empty() {
+                    return Ok(Vec::new());
+                }
+                Ok(vec![MarketDataEnvelope {
+                    venue: self.venue_id.clone(),
+                    instrument: instrument_id,
+                    canonical_symbol,
+                    data_type: MarketDataType::L2Orderbook,
+                    received_at: Timestamp::now(),
+                    exchange_timestamp: None,
+                    sequence: Sequence::new(0),
+                    payload: MarketDataPayload::L2Update(L2Update {
+                        bids,
+                        asks,
+                        is_snapshot: true,
+                    }),
+                }])
+            }
+            "l2update" => {
+                // changes: [[side, price, size], ...]
+                let changes = match value.get("changes").and_then(|v| v.as_array()) {
+                    Some(c) => c,
+                    None => return Ok(Vec::new()),
+                };
+                let mut bids = Vec::new();
+                let mut asks = Vec::new();
+                for change in changes {
+                    let arr = match change.as_array() {
+                        Some(a) if a.len() >= 3 => a,
+                        _ => continue,
+                    };
+                    let side_str = arr.first().and_then(|v| v.as_str()).unwrap_or("");
+                    let price = match arr
+                        .get(1)
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<Decimal>().ok())
+                        .and_then(|d| Price::try_new(d).ok())
+                    {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let qty = match arr
+                        .get(2)
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<Decimal>().ok())
+                        .and_then(|d| Quantity::try_new(d).ok())
+                    {
+                        Some(q) => q,
+                        None => continue,
+                    };
+                    if side_str.eq_ignore_ascii_case("buy") {
+                        bids.push((price, qty));
+                    } else {
+                        asks.push((price, qty));
+                    }
+                }
+                if bids.is_empty() && asks.is_empty() {
+                    return Ok(Vec::new());
+                }
+                Ok(vec![MarketDataEnvelope {
+                    venue: self.venue_id.clone(),
+                    instrument: instrument_id,
+                    canonical_symbol,
+                    data_type: MarketDataType::L2Orderbook,
+                    received_at: Timestamp::now(),
+                    exchange_timestamp: None,
+                    sequence: Sequence::new(0),
+                    payload: MarketDataPayload::L2Update(L2Update {
+                        bids,
+                        asks,
+                        is_snapshot: false,
+                    }),
+                }])
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
 }
 
 impl VenueAdapter for GenericWsAdapter {
@@ -4900,6 +5114,162 @@ mod tests {
     fn test_okx_unknown_channel_returns_empty() {
         let adapter = make_okx_adapter("okx");
         let msg = r#"{"arg":{"channel":"candle1m","instId":"BTC-USDT"},"data":[]}"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert!(events.is_empty());
+    }
+
+    // ── Coinbase Exchange ───────────────────────────────────────────────
+
+    fn make_coinbase_adapter() -> GenericWsAdapter {
+        let conn = ConnectionConfig {
+            ws_url: "wss://example.invalid/ws".to_owned(),
+            reconnect_delay_ms: 1000,
+            max_reconnect_delay_ms: 60000,
+            max_reconnect_attempts: 0,
+            ping_interval_secs: 30,
+            pong_timeout_secs: 10,
+        };
+        let mut cm = HashMap::new();
+        cm.insert("trade".to_owned(), "matches".to_owned());
+        cm.insert("ticker".to_owned(), "ticker".to_owned());
+        cm.insert("l2_orderbook".to_owned(), "level2_batch".to_owned());
+        let ws_cfg = GenericWsConfig {
+            subscribe_template: None,
+            batch_subscribe_template: None,
+            stream_format: "${channel}".to_owned(),
+            channel_map: cm,
+            message_format: "json".to_owned(),
+        };
+        let mut adapter = GenericWsAdapter::new("coinbase", conn, ws_cfg, None)
+            .expect("adapter creation succeeds");
+        adapter
+            .instrument_map
+            .insert("BTC-USD".to_owned(), "BTC/USD".to_owned());
+        adapter
+            .instrument_map
+            .insert("ETH-USD".to_owned(), "ETH/USD".to_owned());
+        adapter
+    }
+
+    #[test]
+    fn test_coinbase_parse_match_yields_trade() {
+        let adapter = make_coinbase_adapter();
+        let msg = r#"{
+            "type": "match",
+            "trade_id": 123456789,
+            "maker_order_id": "ac928c66-ca53-498f-9c13-a110027a60e8",
+            "taker_order_id": "132fb6ae-456b-4654-b4e0-d681ac05cea1",
+            "side": "sell",
+            "size": "0.05",
+            "price": "42000.50",
+            "product_id": "BTC-USD",
+            "sequence": 50,
+            "time": "2021-04-17T12:00:00.000Z"
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::Trade(t) => {
+                assert_eq!(t.side, Side::Sell);
+                assert_eq!(t.trade_id.as_deref(), Some("123456789"));
+            }
+            other => panic!("expected Trade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_coinbase_parse_ticker_yields_ticker() {
+        let adapter = make_coinbase_adapter();
+        let msg = r#"{
+            "type": "ticker",
+            "sequence": 37475248783,
+            "product_id": "BTC-USD",
+            "price": "42000.50",
+            "open_24h": "41500.00",
+            "volume_24h": "1234.56",
+            "low_24h": "41000.00",
+            "high_24h": "42500.00",
+            "volume_30d": "40000.00",
+            "best_bid": "42000.30",
+            "best_bid_size": "0.10",
+            "best_ask": "42000.70",
+            "best_ask_size": "0.15",
+            "side": "buy",
+            "time": "2021-04-17T12:00:00.000Z",
+            "trade_id": 12345,
+            "last_size": "0.05"
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::Ticker(_) => {}
+            other => panic!("expected Ticker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_coinbase_parse_snapshot_flags_is_snapshot() {
+        let adapter = make_coinbase_adapter();
+        let msg = r#"{
+            "type": "snapshot",
+            "product_id": "BTC-USD",
+            "bids": [["42000.00","0.5"],["41999.00","1.0"]],
+            "asks": [["42001.00","0.3"],["42002.00","0.8"]]
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => {
+                assert!(u.is_snapshot);
+                assert_eq!(u.bids.len(), 2);
+                assert_eq!(u.asks.len(), 2);
+            }
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_coinbase_parse_l2update_splits_by_side() {
+        let adapter = make_coinbase_adapter();
+        let msg = r#"{
+            "type": "l2update",
+            "product_id": "BTC-USD",
+            "time": "2021-04-17T12:00:00.000Z",
+            "changes": [
+                ["buy", "42000.00", "0.15"],
+                ["sell", "42001.00", "0.00"],
+                ["sell", "42002.00", "0.30"]
+            ]
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => {
+                assert!(!u.is_snapshot);
+                assert_eq!(u.bids.len(), 1);
+                assert_eq!(u.asks.len(), 2);
+            }
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_coinbase_subscriptions_and_heartbeat_return_empty() {
+        let adapter = make_coinbase_adapter();
+        for msg in [
+            r#"{"type":"subscriptions","channels":[]}"#,
+            r#"{"type":"heartbeat","sequence":1,"last_trade_id":1,"product_id":"BTC-USD","time":"2021-04-17T12:00:00.000Z"}"#,
+            r#"{"type":"status"}"#,
+        ] {
+            let events = adapter.parse_message(msg).expect("parse ok");
+            assert!(events.is_empty(), "control event produced events: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_coinbase_unknown_type_returns_empty() {
+        let adapter = make_coinbase_adapter();
+        let msg = r#"{"type":"received","product_id":"BTC-USD"}"#;
         let events = adapter.parse_message(msg).expect("parse ok");
         assert!(events.is_empty());
     }
