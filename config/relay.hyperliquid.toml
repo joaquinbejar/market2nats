@@ -1,0 +1,121 @@
+#
+# market2nats — Hyperliquid (on-chain perpetuals)
+#
+# Drop-in profile. Hyperliquid sends one subscribe frame per subscription
+# with an object-shaped "subscription" value. The generic_ws adapter's
+# non-batch subscribe_template path handles this via ${channel} and
+# ${instrument} substitution inside a JSON object template.
+#
+# Endpoint: wss://api.hyperliquid.xyz/ws
+#
+# Subscribe shape (one frame per data type per instrument):
+#   {"method":"subscribe","subscription":{"type":"trades","coin":"BTC"}}
+#   {"method":"subscribe","subscription":{"type":"l2Book","coin":"BTC"}}
+#
+# Hyperliquid is a fully on-chain perpetuals exchange. The public feeds
+# cover trades, orderbook, and BBO. There is no dedicated funding-rate or
+# liquidation topic on the public WS; consumers fetch funding via the
+# REST `/info` endpoint, and liquidations can be inferred from trades
+# with the "liquidation" flag. Out of scope for v1 of this venue.
+#
+# NATS subjects produced:
+#   market.hyperliquid.btc-usd.trade
+#   market.hyperliquid.btc-usd.ticker
+#   market.hyperliquid.btc-usd.l2_orderbook
+#   (same for eth-usd)
+
+[service]
+name = "market2nats-hyperliquid"
+log_level = "info"
+log_format = "json"
+shutdown_timeout_ms = 5000
+
+[serialization]
+format = "json"
+
+[nats]
+urls = ["nats://localhost:4222"]
+connect_timeout_ms = 5000
+reconnect_buffer_size = 8388608
+max_reconnects = -1
+ping_interval_secs = 20
+auth = "userpass"
+username = "${NATS_USER}"
+password = "${NATS_PASSWORD}"
+
+[nats.tls]
+enabled = false
+
+# ── Streams ──────────────────────────────────
+
+[[nats.streams]]
+name = "MARKET_TRADES"
+subjects = ["market.hyperliquid.*.trade"]
+storage = "file"
+retention = "limits"
+max_age_secs = 86400
+max_bytes = 1073741824
+max_msg_size = 65536
+discard = "old"
+num_replicas = 1
+duplicate_window_secs = 120
+
+[[nats.streams]]
+name = "MARKET_TICKER_HYPERLIQUID"
+subjects = ["market.hyperliquid.*.ticker"]
+storage = "memory"
+retention = "limits"
+max_age_secs = 300
+num_replicas = 1
+
+[[nats.streams]]
+name = "MARKET_ORDERBOOK_HYPERLIQUID"
+subjects = ["market.hyperliquid.*.l2_orderbook"]
+storage = "file"
+retention = "limits"
+max_age_secs = 3600
+max_bytes = 5368709120
+num_replicas = 1
+
+# ── Hyperliquid ──────────────────────────────
+
+[[venues]]
+id = "hyperliquid"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://api.hyperliquid.xyz/ws"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 50
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+# One frame per (channel, instrument), JSON object shape, ${channel}
+# and ${instrument} substituted directly.
+subscribe_template = '{"method":"subscribe","subscription":{"type":"${channel}","coin":"${instrument}"}}'
+stream_format = "${channel}:${instrument}"
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "trades"
+# bbo ships the Hyperliquid best bid/offer without a full ticker.
+ticker = "bbo"
+l2_orderbook = "l2Book"
+
+[[venues.subscriptions]]
+instrument = "BTC"
+canonical_symbol = "BTC/USD"
+data_types = ["trade", "ticker", "l2_orderbook"]
+
+[[venues.subscriptions]]
+instrument = "ETH"
+canonical_symbol = "ETH/USD"
+data_types = ["trade", "ticker", "l2_orderbook"]

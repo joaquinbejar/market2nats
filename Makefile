@@ -86,6 +86,11 @@ run-bitmex:
 run-bitstamp:
 	cargo run --release -- config/relay.bitstamp.toml
 
+# Run the project against Hyperliquid (on-chain perpetuals).
+.PHONY: run-hyperliquid
+run-hyperliquid:
+	cargo run --release -- config/relay.hyperliquid.toml
+
 .PHONY: fix
 fix:
 	cargo fix --allow-staged --allow-dirty

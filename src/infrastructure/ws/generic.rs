@@ -177,6 +177,7 @@ impl GenericWsAdapter {
             "bybit" | "bybit-linear" => return self.parse_bybit_envelope(&value),
             "bitmex" => return self.parse_bitmex_envelope(&value),
             "bitstamp" => return self.parse_bitstamp_envelope(&value),
+            "hyperliquid" => return self.parse_hyperliquid_envelope(&value),
             _ => {}
         }
 
@@ -486,6 +487,242 @@ impl GenericWsAdapter {
                 quantity,
             }),
         }))
+    }
+
+    /// Parses a Hyperliquid public stream envelope:
+    /// `{"channel":"<kind>","data":{...}}` or `{"channel":"trades","data":[...]}`.
+    ///
+    /// Supported channels:
+    /// - `trades` → [`MarketDataType::Trade`] (array of trade objects)
+    /// - `bbo`    → [`MarketDataType::Ticker`] (top-of-book from `bbo` array)
+    /// - `l2Book` → [`MarketDataType::L2Orderbook`] (always snapshot)
+    fn parse_hyperliquid_envelope(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<Vec<MarketDataEnvelope>, VenueError> {
+        let channel = match value.get("channel").and_then(|v| v.as_str()) {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+        let data = match value.get("data") {
+            Some(d) => d,
+            None => return Ok(Vec::new()),
+        };
+
+        match channel {
+            "trades" => {
+                let arr = match data.as_array() {
+                    Some(a) => a,
+                    None => return Ok(Vec::new()),
+                };
+                let mut events = Vec::with_capacity(arr.len());
+                for item in arr {
+                    let coin = match item.get("coin").and_then(|v| v.as_str()) {
+                        Some(c) => c,
+                        None => continue,
+                    };
+                    let canonical = match self.lookup_canonical(coin) {
+                        Some(c) => c,
+                        None => continue,
+                    };
+                    let price =
+                        match extract_decimal(item, &["px"]).and_then(|d| Price::try_new(d).ok()) {
+                            Some(p) => p,
+                            None => continue,
+                        };
+                    let quantity = match extract_decimal(item, &["sz"])
+                        .and_then(|d| Quantity::try_new(d).ok())
+                    {
+                        Some(q) => q,
+                        None => continue,
+                    };
+                    let side = match item.get("side").and_then(|v| v.as_str()).unwrap_or("B") {
+                        "A" | "a" => Side::Sell,
+                        _ => Side::Buy,
+                    };
+                    // Prefer hash (on-chain tx) as trade_id for idempotence; fall back to tid.
+                    let trade_id = item
+                        .get("hash")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_owned())
+                        .or_else(|| {
+                            item.get("tid").and_then(|v| {
+                                if let Some(s) = v.as_str() {
+                                    Some(s.to_owned())
+                                } else {
+                                    v.as_u64().map(|n| n.to_string())
+                                }
+                            })
+                        });
+                    let exchange_ts = item
+                        .get("time")
+                        .and_then(|v| v.as_u64())
+                        .map(Timestamp::new);
+
+                    events.push(MarketDataEnvelope {
+                        venue: self.venue_id.clone(),
+                        instrument: InstrumentId::try_new(coin).map_err(|e| {
+                            VenueError::ReceiveFailed {
+                                venue: self.venue_id.as_str().to_owned(),
+                                reason: e.to_string(),
+                            }
+                        })?,
+                        canonical_symbol: CanonicalSymbol::try_new(&canonical).map_err(|e| {
+                            VenueError::ReceiveFailed {
+                                venue: self.venue_id.as_str().to_owned(),
+                                reason: e.to_string(),
+                            }
+                        })?,
+                        data_type: MarketDataType::Trade,
+                        received_at: Timestamp::now(),
+                        exchange_timestamp: exchange_ts,
+                        sequence: Sequence::new(0),
+                        payload: MarketDataPayload::Trade(Trade {
+                            price,
+                            quantity,
+                            side,
+                            trade_id,
+                        }),
+                    });
+                }
+                Ok(events)
+            }
+            "bbo" => {
+                let coin = match data.get("coin").and_then(|v| v.as_str()) {
+                    Some(c) => c,
+                    None => return Ok(Vec::new()),
+                };
+                let canonical = match self.lookup_canonical(coin) {
+                    Some(c) => c,
+                    None => return Ok(Vec::new()),
+                };
+                // bbo is a 2-element array: index 0 = bid, index 1 = ask.
+                let bbo_arr = match data.get("bbo").and_then(|v| v.as_array()) {
+                    Some(a) if a.len() >= 2 => a,
+                    _ => return Ok(Vec::new()),
+                };
+                let bid_obj = match bbo_arr.first() {
+                    Some(o) => o,
+                    None => return Ok(Vec::new()),
+                };
+                let ask_obj = match bbo_arr.get(1) {
+                    Some(o) => o,
+                    None => return Ok(Vec::new()),
+                };
+                let bid_price =
+                    match extract_decimal(bid_obj, &["px"]).and_then(|d| Price::try_new(d).ok()) {
+                        Some(p) => p,
+                        None => return Ok(Vec::new()),
+                    };
+                let bid_qty = match extract_decimal(bid_obj, &["sz"])
+                    .and_then(|d| Quantity::try_new(d).ok())
+                {
+                    Some(q) => q,
+                    None => return Ok(Vec::new()),
+                };
+                let ask_price =
+                    match extract_decimal(ask_obj, &["px"]).and_then(|d| Price::try_new(d).ok()) {
+                        Some(p) => p,
+                        None => return Ok(Vec::new()),
+                    };
+                let ask_qty = match extract_decimal(ask_obj, &["sz"])
+                    .and_then(|d| Quantity::try_new(d).ok())
+                {
+                    Some(q) => q,
+                    None => return Ok(Vec::new()),
+                };
+                // No last_price field on bbo — use midpoint.
+                let last_price = bid_price
+                    .value()
+                    .checked_add(ask_price.value())
+                    .and_then(|sum| sum.checked_div(Decimal::TWO))
+                    .and_then(|mid| Price::try_new(mid).ok());
+                let last_price = match last_price {
+                    Some(p) => p,
+                    None => return Ok(Vec::new()),
+                };
+                let exchange_ts = data
+                    .get("time")
+                    .and_then(|v| v.as_u64())
+                    .map(Timestamp::new);
+
+                Ok(vec![MarketDataEnvelope {
+                    venue: self.venue_id.clone(),
+                    instrument: InstrumentId::try_new(coin).map_err(|e| {
+                        VenueError::ReceiveFailed {
+                            venue: self.venue_id.as_str().to_owned(),
+                            reason: e.to_string(),
+                        }
+                    })?,
+                    canonical_symbol: CanonicalSymbol::try_new(&canonical).map_err(|e| {
+                        VenueError::ReceiveFailed {
+                            venue: self.venue_id.as_str().to_owned(),
+                            reason: e.to_string(),
+                        }
+                    })?,
+                    data_type: MarketDataType::Ticker,
+                    received_at: Timestamp::now(),
+                    exchange_timestamp: exchange_ts,
+                    sequence: Sequence::new(0),
+                    payload: MarketDataPayload::Ticker(Ticker {
+                        bid_price,
+                        bid_qty,
+                        ask_price,
+                        ask_qty,
+                        last_price,
+                    }),
+                }])
+            }
+            "l2Book" => {
+                let coin = match data.get("coin").and_then(|v| v.as_str()) {
+                    Some(c) => c,
+                    None => return Ok(Vec::new()),
+                };
+                let canonical = match self.lookup_canonical(coin) {
+                    Some(c) => c,
+                    None => return Ok(Vec::new()),
+                };
+                // levels[0] = bids, levels[1] = asks; each level is {px, sz, n}.
+                let levels = match data.get("levels").and_then(|v| v.as_array()) {
+                    Some(l) if l.len() >= 2 => l,
+                    _ => return Ok(Vec::new()),
+                };
+                let bids = parse_hyperliquid_levels(levels.first());
+                let asks = parse_hyperliquid_levels(levels.get(1));
+                if bids.is_empty() && asks.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let exchange_ts = data
+                    .get("time")
+                    .and_then(|v| v.as_u64())
+                    .map(Timestamp::new);
+                Ok(vec![MarketDataEnvelope {
+                    venue: self.venue_id.clone(),
+                    instrument: InstrumentId::try_new(coin).map_err(|e| {
+                        VenueError::ReceiveFailed {
+                            venue: self.venue_id.as_str().to_owned(),
+                            reason: e.to_string(),
+                        }
+                    })?,
+                    canonical_symbol: CanonicalSymbol::try_new(&canonical).map_err(|e| {
+                        VenueError::ReceiveFailed {
+                            venue: self.venue_id.as_str().to_owned(),
+                            reason: e.to_string(),
+                        }
+                    })?,
+                    data_type: MarketDataType::L2Orderbook,
+                    received_at: Timestamp::now(),
+                    exchange_timestamp: exchange_ts,
+                    sequence: Sequence::new(0),
+                    payload: MarketDataPayload::L2Update(L2Update {
+                        bids,
+                        asks,
+                        is_snapshot: true,
+                    }),
+                }])
+            }
+            _ => Ok(Vec::new()),
+        }
     }
 
     /// Parses a Binance combined stream message.
@@ -1601,6 +1838,28 @@ fn parse_price_levels(value: &serde_json::Value, keys: &[&str]) -> Vec<(Price, Q
     Vec::new()
 }
 
+/// Parses Hyperliquid book levels: array of `{px, sz, n}` objects.
+#[must_use]
+fn parse_hyperliquid_levels(value: Option<&serde_json::Value>) -> Vec<(Price, Quantity)> {
+    let arr = match value.and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    let mut levels = Vec::with_capacity(arr.len());
+    for item in arr {
+        let price = match extract_decimal(item, &["px"]).and_then(|d| Price::try_new(d).ok()) {
+            Some(p) => p,
+            None => continue,
+        };
+        let qty = match extract_decimal(item, &["sz"]).and_then(|d| Quantity::try_new(d).ok()) {
+            Some(q) => q,
+            None => continue,
+        };
+        levels.push((price, qty));
+    }
+    levels
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2155,6 +2414,142 @@ mod tests {
     fn test_bitstamp_unknown_channel_returns_empty() {
         let adapter = make_bitstamp_adapter();
         let msg = r#"{"event":"data","channel":"mystery_btcusdt","data":{}}"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert!(events.is_empty());
+    }
+
+    fn make_hyperliquid_adapter() -> GenericWsAdapter {
+        let conn = ConnectionConfig {
+            ws_url: "wss://example.invalid/ws".to_owned(),
+            reconnect_delay_ms: 1000,
+            max_reconnect_delay_ms: 60000,
+            max_reconnect_attempts: 0,
+            ping_interval_secs: 50,
+            pong_timeout_secs: 10,
+        };
+        let mut cm = HashMap::new();
+        cm.insert("trade".to_owned(), "trades".to_owned());
+        cm.insert("ticker".to_owned(), "bbo".to_owned());
+        cm.insert("l2_orderbook".to_owned(), "l2Book".to_owned());
+        let ws_cfg = GenericWsConfig {
+            subscribe_template: None,
+            batch_subscribe_template: None,
+            stream_format: "${channel}:${instrument}".to_owned(),
+            channel_map: cm,
+            message_format: "json".to_owned(),
+        };
+        let mut adapter = GenericWsAdapter::new("hyperliquid", conn, ws_cfg, None)
+            .expect("adapter creation succeeds");
+        adapter
+            .instrument_map
+            .insert("BTC".to_owned(), "BTC/USD".to_owned());
+        adapter
+            .instrument_map
+            .insert("ETH".to_owned(), "ETH/USD".to_owned());
+        adapter
+    }
+
+    #[test]
+    fn test_hyperliquid_parse_trades_yields_trades() {
+        let adapter = make_hyperliquid_adapter();
+        let msg = r#"{
+            "channel": "trades",
+            "data": [{
+                "coin": "BTC",
+                "side": "B",
+                "px": "42000.5",
+                "sz": "0.001",
+                "time": 1700000000123,
+                "hash": "0xabcdef1234567890",
+                "tid": 123456789
+            },{
+                "coin": "BTC",
+                "side": "A",
+                "px": "42001.0",
+                "sz": "0.002",
+                "time": 1700000000124,
+                "hash": "0xdeadbeef",
+                "tid": 123456790
+            }]
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 2);
+        match &events[0].payload {
+            MarketDataPayload::Trade(t) => {
+                assert_eq!(t.side, Side::Buy);
+                assert_eq!(t.trade_id.as_deref(), Some("0xabcdef1234567890"));
+            }
+            other => panic!("expected Trade, got {other:?}"),
+        }
+        match &events[1].payload {
+            MarketDataPayload::Trade(t) => assert_eq!(t.side, Side::Sell),
+            other => panic!("expected Trade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_hyperliquid_parse_bbo_yields_ticker_with_midpoint_last() {
+        let adapter = make_hyperliquid_adapter();
+        let msg = r#"{
+            "channel": "bbo",
+            "data": {
+                "coin": "BTC",
+                "time": 1700000000123,
+                "bbo": [
+                    {"px": "42000.0", "sz": "0.15", "n": 3},
+                    {"px": "42002.0", "sz": "0.10", "n": 2}
+                ]
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::Ticker(t) => {
+                use rust_decimal_macros::dec;
+                assert_eq!(t.bid_price.value(), dec!(42000.0));
+                assert_eq!(t.ask_price.value(), dec!(42002.0));
+                assert_eq!(t.last_price.value(), dec!(42001));
+            }
+            other => panic!("expected Ticker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_hyperliquid_parse_l2_book_always_snapshot() {
+        let adapter = make_hyperliquid_adapter();
+        let msg = r#"{
+            "channel": "l2Book",
+            "data": {
+                "coin": "BTC",
+                "time": 1700000000123,
+                "levels": [
+                    [
+                        {"px": "42000.0", "sz": "0.50", "n": 4},
+                        {"px": "41999.0", "sz": "1.00", "n": 6}
+                    ],
+                    [
+                        {"px": "42001.0", "sz": "0.30", "n": 2},
+                        {"px": "42002.0", "sz": "0.80", "n": 5}
+                    ]
+                ]
+            }
+        }"#;
+        let events = adapter.parse_message(msg).expect("parse ok");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            MarketDataPayload::L2Update(u) => {
+                assert!(u.is_snapshot);
+                assert_eq!(u.bids.len(), 2);
+                assert_eq!(u.asks.len(), 2);
+            }
+            other => panic!("expected L2Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_hyperliquid_unknown_channel_returns_empty() {
+        let adapter = make_hyperliquid_adapter();
+        let msg = r#"{"channel":"candle","data":{"coin":"BTC"}}"#;
         let events = adapter.parse_message(msg).expect("parse ok");
         assert!(events.is_empty());
     }
