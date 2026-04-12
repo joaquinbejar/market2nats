@@ -138,16 +138,19 @@ funding_rate = "ticker"
 liquidation = "trades"
 
 # Per-data-type suffixes appended to the rendered stream name.
-# trade → "trades.BTC-PERPETUAL" + ".raw" = "trades.BTC-PERPETUAL.raw"
-# ticker → "ticker.BTC-PERPETUAL" + ".raw" = "ticker.BTC-PERPETUAL.raw"
-# l2_orderbook → "book.BTC-PERPETUAL" + ".none.20.100ms" = "book.BTC-PERPETUAL.none.20.100ms"
+# NOTE: ".raw" channels require authentication on Deribit; use ".100ms" or
+# no suffix for unauthenticated public access. ".raw" is preferred when the
+# service runs with Deribit API keys.
+# trade → "trades.BTC-PERPETUAL" + ".100ms"
+# ticker → "ticker.BTC-PERPETUAL" + ".100ms"
+# l2_orderbook → "book.BTC-PERPETUAL" + ".none.20.100ms"
 # funding_rate → re-uses ticker channel, so same suffix as ticker
 [venues.generic_ws.channel_suffix]
-trade = ".raw"
-ticker = ".raw"
+trade = ".100ms"
+ticker = ".100ms"
 l2_orderbook = ".none.20.100ms"
-funding_rate = ".raw"
-liquidation = ".raw"
+funding_rate = ".100ms"
+liquidation = ".100ms"
 
 [[venues.subscriptions]]
 instrument = "BTC-PERPETUAL"
