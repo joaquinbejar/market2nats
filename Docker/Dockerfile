@@ -9,15 +9,18 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/market2nats/Cargo.toml crates/market2nats/Cargo.toml
 COPY crates/market2nats/build.rs   crates/market2nats/build.rs
 COPY crates/market2nats/proto/     crates/market2nats/proto/
+COPY crates/market2nats-domain/Cargo.toml crates/market2nats-domain/Cargo.toml
 
 # Dummy src to cache dependency compilation.
-RUN mkdir -p crates/market2nats/src && \
+RUN mkdir -p crates/market2nats/src crates/market2nats-domain/src && \
     printf 'fn main() {}' > crates/market2nats/src/main.rs && \
     printf ''              > crates/market2nats/src/lib.rs  && \
+    printf ''              > crates/market2nats-domain/src/lib.rs && \
     cargo build --release -p market2nats 2>/dev/null || true && \
-    rm -rf crates/market2nats/src
+    rm -rf crates/market2nats/src crates/market2nats-domain/src
 
 # Copy real source and build.
+COPY crates/market2nats-domain/src/ crates/market2nats-domain/src/
 COPY crates/market2nats/src/ crates/market2nats/src/
 RUN cargo build --release -p market2nats --bin market2nats
 
