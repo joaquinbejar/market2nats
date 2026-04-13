@@ -1,0 +1,12 @@
+target/
+.git/
+.gitignore
+.github/
+.windsurf/
+.internalDoc/
+*.md
+!README.md
+Makefile
+Docker/
+coverage/
+*.profraw
