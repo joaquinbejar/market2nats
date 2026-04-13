@@ -1,4 +1,4 @@
-//! NATS connection setup with authentication support.
+//! NATS connection setup with authentication and TLS support.
 
 use std::time::Duration;
 
@@ -7,12 +7,15 @@ use tracing::info;
 use crate::config::model::NatsConfig;
 use crate::domain::OracleError;
 
-/// Connects to NATS using the provided configuration, including authentication.
+/// Connects to NATS using the provided configuration.
 ///
-/// Supports three auth methods configured via `config.auth`:
-/// - `"none"` (default) — no authentication.
-/// - `"token"` — token-based authentication using `config.token`.
-/// - `"userpass"` — username/password authentication using `config.username` and `config.password`.
+/// **Authentication** is resolved in order:
+/// 1. Credentials embedded in the URL (e.g. `nats://user:pass@host:4222`).
+/// 2. Explicit `auth` field: `"token"`, `"userpass"`, or `"none"` (default).
+///
+/// **TLS** is enabled automatically when:
+/// - The URL scheme is `tls://`, or
+/// - `tls_required` is set to `true` in config.
 ///
 /// # Errors
 ///
@@ -30,6 +33,12 @@ pub async fn connect_nats(config: &NatsConfig) -> Result<async_nats::Client, Ora
         options = options.name(name.as_str());
     }
 
+    // TLS support.
+    if config.tls_required == Some(true) {
+        options = options.require_tls(true);
+    }
+
+    // Explicit auth (only needed when credentials are NOT in the URL).
     match config.auth.as_str() {
         "token" => {
             if let Some(ref token) = config.token {
@@ -42,7 +51,8 @@ pub async fn connect_nats(config: &NatsConfig) -> Result<async_nats::Client, Ora
             }
         }
         _ => {
-            // "none" or unrecognized — no auth.
+            // "none" or unrecognized — no explicit auth.
+            // Credentials may still be embedded in the URL.
         }
     }
 

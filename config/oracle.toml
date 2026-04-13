@@ -5,6 +5,8 @@ log_format = "json"
 http_port = 9091
 
 [nats]
+# Credentials can be embedded in the URL: nats://user:password@host:port
+# Or set explicitly via auth/username/password fields.
 urls = ["nats://localhost:4222"]
 auth = "userpass"
 username = "${NATS_USER}"
