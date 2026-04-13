@@ -25,7 +25,9 @@ RUN mkdir -p crates/market2nats/src && \
 
 # Copy real oracle source and build.
 COPY crates/oracle/src/ crates/oracle/src/
-RUN cargo build --release -p oracle --bin oracle
+RUN rm -f target/release/oracle target/release/deps/oracle-* \
+         target/release/deps/liboracle-* && \
+    cargo build --release -p oracle --bin oracle
 
 # ── Runtime ──────────────────────────────────────────────────────────────
 
