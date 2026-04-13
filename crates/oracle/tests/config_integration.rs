@@ -66,7 +66,7 @@ fn test_build_pipeline_from_config() {
     ];
     let symbol = CanonicalSymbol::try_new("BTC/USDT").unwrap();
     let result = pipeline
-        .compute(&symbol, &sources)
+        .compute(&symbol, &sources, Timestamp::now())
         .expect("pipeline should compute with valid sources");
 
     // All prices are within 100 bps of each other, so all should survive.
@@ -109,15 +109,29 @@ subject_pattern = "oracle.<symbol_normalized>.price"
 
     match config {
         Ok(cfg) => {
-            // Config loaded fine; the strategy validation happens at build time.
+            // Config loaded fine; verify the build step rejects this exact
+            // unknown strategy rather than failing for an unrelated reason.
             let pipeline_result = build_pipeline(&cfg.pipeline);
-            assert!(
-                pipeline_result.is_err(),
-                "build_pipeline should reject unknown strategy"
-            );
+            match pipeline_result {
+                Ok(_) => panic!("build_pipeline should reject unknown strategy"),
+                Err(err) => {
+                    let err_text = format!("{err:?}");
+                    assert!(
+                        err_text.contains("UnknownStrategy")
+                            && err_text.contains("nonexistent_strategy"),
+                        "expected UnknownStrategy(\"nonexistent_strategy\") from build_pipeline, got: {err_text}"
+                    );
+                }
+            }
         }
-        Err(_) => {
-            // If validation catches it at load time, that's also acceptable.
+        Err(err) => {
+            // If validation catches it at load time, verify that it is the
+            // expected unknown-strategy error.
+            let err_text = format!("{err:?}");
+            assert!(
+                err_text.contains("UnknownStrategy") && err_text.contains("nonexistent_strategy"),
+                "expected UnknownStrategy(\"nonexistent_strategy\") from load_config, got: {err_text}"
+            );
         }
     }
 

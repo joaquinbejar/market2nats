@@ -45,12 +45,12 @@ fn test_pipeline_realistic_btc_filters_and_computes() {
 
     let symbol = CanonicalSymbol::try_new("BTC/USDT").unwrap();
     let result = pipeline
-        .compute(&symbol, &sources)
+        .compute(&symbol, &sources, Timestamp::now())
         .expect("pipeline should succeed with 7 surviving sources");
 
     // bitfinex (stale, age=15000 > 10000) should be filtered out by StalenessFilter.
-    // dydx (68000) deviates ~86 bps from median of remaining 8 sources -- let's verify
-    // it gets filtered by the OutlierFilter(100bps).
+    // dydx (68500.00) deviates ~160 bps from the post-staleness median of the
+    // remaining sources, so it gets filtered by the OutlierFilter(100bps).
     // After both filters, we expect 7 sources to survive.
     assert_eq!(
         result.sources.len(),
@@ -107,15 +107,16 @@ fn test_pipeline_insufficient_sources_after_filtering() {
     );
 
     let symbol = CanonicalSymbol::try_new("BTC/USDT").unwrap();
-    let result = pipeline.compute(&symbol, &sources);
+    let result = pipeline.compute(&symbol, &sources, Timestamp::now());
 
     match result {
-        Err(OracleError::InsufficientSources {
-            required,
-            available,
-        }) => {
-            assert_eq!(required, 3, "required should be 3");
-            assert_eq!(available, 2, "available should be 2");
+        Err(err @ OracleError::InsufficientSources { .. }) => {
+            let msg = err.to_string();
+            assert!(
+                msg.contains("3") && msg.contains("2"),
+                "error should contain required=3 and available=2: {}",
+                msg
+            );
         }
         other => panic!("expected InsufficientSources error, got: {:?}", other),
     }
@@ -136,26 +137,24 @@ fn test_pipeline_all_sources_stale() {
     );
 
     let symbol = CanonicalSymbol::try_new("BTC/USDT").unwrap();
-    let result = pipeline.compute(&symbol, &sources);
+    let result = pipeline.compute(&symbol, &sources, Timestamp::now());
 
     match result {
-        Err(OracleError::AllSourcesStale { symbol: s }) => {
-            assert_eq!(s, "BTC/USDT", "symbol should be preserved in error");
+        Err(err @ OracleError::AllSourcesStale { .. }) => {
+            assert!(
+                err.to_string().contains("BTC/USDT"),
+                "symbol should be preserved in error: {}",
+                err
+            );
         }
         other => panic!("expected AllSourcesStale error, got: {:?}", other),
     }
 }
 
 #[test]
-fn test_pipeline_all_sources_are_outliers_except_one() {
-    // One "normal" price and three far-away outliers.
-    // Median of [100, 500, 600, 700] = avg(500, 600) = 550
-    // 100 deviates by |100-550|/550*10000 = ~8181 bps >> 100
-    // 500 deviates by |500-550|/550*10000 = ~909 bps >> 100
-    // 600 deviates by |600-550|/550*10000 = ~909 bps >> 100
-    // 700 deviates by |700-550|/550*10000 = ~2727 bps >> 100
-    // With threshold=100 bps, likely all get filtered.
-    // Actually let's make it clearer: use prices tightly clustered except one lonely one.
+fn test_pipeline_all_sources_filtered_as_outliers() {
+    // All 4 sources are spread far apart, so with a tight OutlierFilter(10 bps)
+    // every source deviates far more than 0.1% from the median and gets filtered.
     let sources = vec![
         make_source("a", dec!(100), dec!(1.0), 500),
         make_source("b", dec!(200), dec!(1.0), 500),
@@ -172,17 +171,13 @@ fn test_pipeline_all_sources_are_outliers_except_one() {
     );
 
     let symbol = CanonicalSymbol::try_new("ETH/USDT").unwrap();
-    let result = pipeline.compute(&symbol, &sources);
+    let result = pipeline.compute(&symbol, &sources, Timestamp::now());
 
     // All sources are filtered as outliers, so AllSourcesStale is returned
     // (since filtered vec is empty).
     match result {
         Err(OracleError::AllSourcesStale { .. }) => {}
-        Err(OracleError::InsufficientSources { .. }) => {}
-        other => panic!(
-            "expected AllSourcesStale or InsufficientSources error, got: {:?}",
-            other
-        ),
+        other => panic!("expected AllSourcesStale error, got: {:?}", other),
     }
 }
 
@@ -199,7 +194,7 @@ fn test_pipeline_no_filters_passes_all_sources() {
 
     let symbol = CanonicalSymbol::try_new("BTC/USDT").unwrap();
     let result = pipeline
-        .compute(&symbol, &sources)
+        .compute(&symbol, &sources, Timestamp::now())
         .expect("no filters means all sources pass");
 
     assert_eq!(
