@@ -33,3 +33,5 @@ src/.DS_Store
 /.claude/
 /CLAUDE.md
 /**/CLAUDE.md
+PROMPTS_ORACLE.md
+.githooks/

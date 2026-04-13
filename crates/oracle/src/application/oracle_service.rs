@@ -11,7 +11,7 @@ use tokio::sync::watch;
 use super::health::OracleHealthMonitor;
 use super::metrics::{
     ORACLE_COMPUTATION_ERRORS, ORACLE_COMPUTATION_LATENCY_MS, ORACLE_PRICE_COMPUTED,
-    ORACLE_PRICE_SPREAD_BPS, ORACLE_SOURCES_COUNT,
+    ORACLE_PRICE_SPREAD_BPS, ORACLE_PUBLISH_ERRORS, ORACLE_SOURCES_COUNT,
 };
 use super::ports::{OraclePublisher, TradeSource};
 use crate::domain::OraclePipeline;
@@ -117,6 +117,8 @@ impl<T: TradeSource, P: OraclePublisher> OracleService<T, P> {
 
             match result {
                 Ok(oracle_price) => {
+                    let strategy_label = oracle_price.strategy.to_string();
+
                     // Record spread from the sources in the result.
                     if let Some(spread_bps) = self.compute_spread_bps_from_price(&oracle_price) {
                         gauge!(ORACLE_PRICE_SPREAD_BPS, "symbol" => symbol_normalized.clone())
@@ -129,11 +131,18 @@ impl<T: TradeSource, P: OraclePublisher> OracleService<T, P> {
                             error = %e,
                             "failed to publish oracle price"
                         );
-                        counter!(ORACLE_COMPUTATION_ERRORS, "symbol" => symbol_normalized.clone())
-                            .increment(1);
+                        counter!(
+                            ORACLE_PUBLISH_ERRORS,
+                            "symbol" => symbol_normalized.clone()
+                        )
+                        .increment(1);
                     } else {
-                        counter!(ORACLE_PRICE_COMPUTED, "symbol" => symbol_normalized.clone())
-                            .increment(1);
+                        counter!(
+                            ORACLE_PRICE_COMPUTED,
+                            "symbol" => symbol_normalized.clone(),
+                            "strategy" => strategy_label
+                        )
+                        .increment(1);
                         self.health_monitor.record_computation(symbol);
 
                         tracing::debug!(
@@ -146,13 +155,20 @@ impl<T: TradeSource, P: OraclePublisher> OracleService<T, P> {
                     }
                 }
                 Err(e) => {
+                    let error_kind = e.kind_label();
                     tracing::warn!(
                         symbol = %symbol,
                         error = %e,
+                        error_kind = error_kind,
                         sources = sources.len(),
                         "oracle computation failed"
                     );
-                    counter!(ORACLE_COMPUTATION_ERRORS, "symbol" => symbol_normalized).increment(1);
+                    counter!(
+                        ORACLE_COMPUTATION_ERRORS,
+                        "symbol" => symbol_normalized,
+                        "error_kind" => error_kind
+                    )
+                    .increment(1);
                 }
             }
         }

@@ -2,6 +2,14 @@
 # Detect current branch
 CURRENT_BRANCH := $(shell git rev-parse --abbrev-ref HEAD)
 
+# Docker registry and image versions (read from each crate's Cargo.toml)
+REGISTRY      := ghcr.io
+REPO_OWNER    := joaquinbejar
+M2N_VERSION   := $(shell grep '^version' crates/market2nats/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+ORACLE_VERSION := $(shell grep '^version' crates/oracle/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+M2N_IMAGE     := $(REGISTRY)/$(REPO_OWNER)/market2nats
+ORACLE_IMAGE  := $(REGISTRY)/$(REPO_OWNER)/oracle
+
 
 # Default target
 .PHONY: all
@@ -234,6 +242,41 @@ bench-json: check-cargo-criterion
 bench-clean:
 	rm -rf target/criterion
 
+
+# Ensure a multi-platform buildx builder exists and is active.
+.PHONY: docker-buildx-setup
+docker-buildx-setup:
+	@docker buildx inspect market2nats-builder > /dev/null 2>&1 \
+		|| docker buildx create --name market2nats-builder --driver docker-container --bootstrap
+	docker buildx use market2nats-builder
+
+# Build both images for linux/amd64 and linux/arm64, tag with the crate version
+# and latest, and push to GHCR.
+#
+# Prerequisites:
+#   docker login ghcr.io -u <github-user> --password-stdin <<< <token>
+#
+# Usage:
+#   make docker-publish
+.PHONY: docker-publish
+docker-publish: docker-buildx-setup
+	@echo "→ market2nats $(M2N_VERSION)"
+	docker buildx build \
+		--platform linux/amd64,linux/arm64 \
+		--push \
+		-t $(M2N_IMAGE):$(M2N_VERSION) \
+		-t $(M2N_IMAGE):latest \
+		-f Docker/market2nats.Dockerfile \
+		.
+	@echo "→ oracle $(ORACLE_VERSION)"
+	docker buildx build \
+		--platform linux/amd64,linux/arm64 \
+		--push \
+		-t $(ORACLE_IMAGE):$(ORACLE_VERSION) \
+		-t $(ORACLE_IMAGE):latest \
+		-f Docker/oracle.Dockerfile \
+		.
+	@echo "✓ pushed market2nats:$(M2N_VERSION) oracle:$(ORACLE_VERSION) (latest updated)"
 
 .PHONY: killall
 killall:

@@ -13,23 +13,61 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  docker:
-    runs-on: ubuntu-latest
+  # ── Per-platform build (native runners, no QEMU) ──────────────────────
+  build:
+    name: Build ${{ matrix.image }} (${{ matrix.platform }})
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
 
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - image: market2nats
+            dockerfile: Docker/market2nats.Dockerfile
+            version_crate: crates/market2nats/Cargo.toml
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - image: market2nats
+            dockerfile: Docker/market2nats.Dockerfile
+            version_crate: crates/market2nats/Cargo.toml
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+          - image: oracle
+            dockerfile: Docker/oracle.Dockerfile
+            version_crate: crates/oracle/Cargo.toml
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - image: oracle
+            dockerfile: Docker/oracle.Dockerfile
+            version_crate: crates/oracle/Cargo.toml
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set platform suffix
+        id: platform
+        run: |
+          suffix=$(echo "${{ matrix.platform }}" | tr '/' '-')
+          echo "suffix=${suffix}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract crate version
+        id: crate_version
+        run: |
+          VERSION=$(grep '^version' ${{ matrix.version_crate }} | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -40,21 +78,126 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
+            type=raw,value=${{ steps.crate_version.outputs.version }}-${{ steps.platform.outputs.suffix }},enable={{is_default_branch}}
+            type=raw,value=latest-${{ steps.platform.outputs.suffix }},enable={{is_default_branch}}
+            type=ref,event=branch,suffix=-${{ steps.platform.outputs.suffix }}
+            type=semver,pattern={{version}},suffix=-${{ steps.platform.outputs.suffix }}
+            type=semver,pattern={{major}}.{{minor}},suffix=-${{ steps.platform.outputs.suffix }}
+            type=sha,suffix=-${{ steps.platform.outputs.suffix }}
 
-      - name: Build and push Docker image
+      - name: Build and push platform image
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Docker/Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          provenance: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ steps.platform.outputs.suffix }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ steps.platform.outputs.suffix }}
+
+  # ── Merge multi-arch manifests ─────────────────────────────────────────
+  merge:
+    name: Create Multi-Arch Manifests (${{ matrix.image }})
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      matrix:
+        include:
+          - image: market2nats
+            version_crate: crates/market2nats/Cargo.toml
+          - image: oracle
+            version_crate: crates/oracle/Cargo.toml
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract crate version
+        id: crate_version
+        run: |
+          VERSION=$(grep '^version' ${{ matrix.version_crate }} | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifests
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}"
+          SHA_SHORT="${GITHUB_SHA::7}"
+
+          docker manifest create "${IMAGE}:sha-${SHA_SHORT}" \
+            "${IMAGE}:sha-${SHA_SHORT}-linux-amd64" \
+            "${IMAGE}:sha-${SHA_SHORT}-linux-arm64"
+          docker manifest push "${IMAGE}:sha-${SHA_SHORT}"
+
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            docker manifest create "${IMAGE}:latest" \
+              "${IMAGE}:latest-linux-amd64" \
+              "${IMAGE}:latest-linux-arm64"
+            docker manifest push "${IMAGE}:latest"
+
+            docker manifest create "${IMAGE}:${{ steps.crate_version.outputs.version }}" \
+              "${IMAGE}:${{ steps.crate_version.outputs.version }}-linux-amd64" \
+              "${IMAGE}:${{ steps.crate_version.outputs.version }}-linux-arm64"
+            docker manifest push "${IMAGE}:${{ steps.crate_version.outputs.version }}"
+          fi
+
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            MAJOR="${VERSION%%.*}"
+            MINOR="${VERSION%.*}"
+
+            for tag in "${VERSION}" "${MINOR}" "${MAJOR}"; do
+              docker manifest create "${IMAGE}:${tag}" \
+                "${IMAGE}:${tag}-linux-amd64" \
+                "${IMAGE}:${tag}-linux-arm64"
+              docker manifest push "${IMAGE}:${tag}"
+            done
+          fi
+
+  # ── PR validation (amd64 only, no push) ───────────────────────────────
+  build-pr:
+    name: Build PR ${{ matrix.image }} (amd64)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      matrix:
+        include:
+          - image: market2nats
+            dockerfile: Docker/market2nats.Dockerfile
+          - image: oracle
+            dockerfile: Docker/oracle.Dockerfile
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha,scope=${{ matrix.image }}-linux-amd64
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-linux-amd64

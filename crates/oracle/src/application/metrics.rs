@@ -16,6 +16,9 @@ pub const ORACLE_SOURCES_COUNT: &str = "oracle_sources_count";
 /// Spread between minimum and maximum source price in basis points.
 pub const ORACLE_PRICE_SPREAD_BPS: &str = "oracle_price_spread_bps";
 
+/// Total number of publish errors (NATS publish failures after successful compute).
+pub const ORACLE_PUBLISH_ERRORS: &str = "oracle_publish_errors_total";
+
 /// Time taken to compute an oracle price, in milliseconds.
 pub const ORACLE_COMPUTATION_LATENCY_MS: &str = "oracle_computation_latency_ms";
 
@@ -37,4 +40,5 @@ pub fn register_metrics() {
         ORACLE_COMPUTATION_LATENCY_MS,
         "Oracle computation latency in milliseconds"
     );
+    describe_counter!(ORACLE_PUBLISH_ERRORS, "Total oracle publish errors");
 }

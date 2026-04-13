@@ -18,10 +18,9 @@ services:
       retries: 5
       start_period: 2s
 
-  market-data-relay:
-    build:
-      context: ..
-      dockerfile: Docker/Dockerfile
+  market2nats:
+    image: ghcr.io/joaquinbejar/market2nats:latest
+    command: ["/etc/market2nats/relay.all-spot-trades.toml"]
     ports:
       - "8080:8080"
     depends_on:
@@ -29,8 +28,16 @@ services:
         condition: service_healthy
     environment:
       - NATS_URL=nats://nats:4222
-    volumes:
-      - ../config/relay.toml:/etc/market-data-relay/relay.toml:ro
+
+  oracle:
+    image: ghcr.io/joaquinbejar/oracle:latest
+    ports:
+      - "9091:9091"
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      - NATS_URL=nats://nats:4222
 
 volumes:
   nats-data:

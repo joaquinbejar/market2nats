@@ -1,0 +1,347 @@
+#
+# market2nats — All-venue spot trades (BTC & ETH)
+#
+# Subscribes to trade events from all supported spot venues for
+# BTC/USDT, ETH/USDT (and BTC/USD, ETH/USD where USDT is not available).
+#
+# Venues: binance, bitstamp, bybit, coinbase, crypto-com, gate, kraken, okx
+#
+# NATS subjects produced:
+#   market.<venue>.btc-usdt.trade
+#   market.<venue>.eth-usdt.trade
+#   market.<venue>.btc-usd.trade   (bitfinex, coinbase, kraken)
+#   market.<venue>.eth-usd.trade   (bitfinex, coinbase, kraken)
+#
+
+[service]
+name = "market2nats-all-spot-trades"
+log_level = "info"
+log_format = "json"
+shutdown_timeout_ms = 5000
+
+[nats]
+urls = ["${NATS_URL:-nats://localhost:4222}"]
+connect_timeout_ms = 5000
+reconnect_buffer_size = 8388608
+max_reconnects = -1
+ping_interval_secs = 20
+
+[nats.tls]
+enabled = false
+
+[[nats.streams]]
+name = "MARKET_TRADES"
+subjects = ["market.*.*.trade"]
+storage = "file"
+retention = "limits"
+max_age_secs = 86400
+max_bytes = 1073741824
+max_msg_size = 65536
+discard = "old"
+num_replicas = 1
+duplicate_window_secs = 120
+
+# ── Binance ─────────────────────────────────────
+
+[[venues]]
+id = "binance"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://stream.binance.com:9443/ws"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 30
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+batch_subscribe_template = '{"method":"SUBSCRIBE","params":${params},"id":1}'
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "trade"
+
+[[venues.subscriptions]]
+instrument = "btcusdt"
+canonical_symbol = "BTC/USDT"
+data_types = ["trade"]
+
+[[venues.subscriptions]]
+instrument = "ethusdt"
+canonical_symbol = "ETH/USDT"
+data_types = ["trade"]
+
+# ── Bitstamp ────────────────────────────────────
+
+[[venues]]
+id = "bitstamp"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://ws.bitstamp.net"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 30
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+subscribe_template = '{"event":"bts:subscribe","data":{"channel":"${channel}_${instrument}"}}'
+stream_format = "${channel}_${instrument}"
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "live_trades"
+
+[[venues.subscriptions]]
+instrument = "btcusdt"
+canonical_symbol = "BTC/USDT"
+data_types = ["trade"]
+
+[[venues.subscriptions]]
+instrument = "ethusdt"
+canonical_symbol = "ETH/USDT"
+data_types = ["trade"]
+
+# ── Bybit (Spot) ────────────────────────────────
+
+[[venues]]
+id = "bybit"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://stream.bybit.com/v5/public/spot"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 20
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+batch_subscribe_template = '{"op":"subscribe","args":${params}}'
+stream_format = "${channel}.${instrument}"
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "publicTrade"
+
+[[venues.subscriptions]]
+instrument = "BTCUSDT"
+canonical_symbol = "BTC/USDT"
+data_types = ["trade"]
+
+[[venues.subscriptions]]
+instrument = "ETHUSDT"
+canonical_symbol = "ETH/USDT"
+data_types = ["trade"]
+
+# ── Coinbase ────────────────────────────────────
+
+[[venues]]
+id = "coinbase"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://ws-feed.exchange.coinbase.com"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 30
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+subscribe_mode = "products_channels"
+batch_subscribe_template = '{"type":"subscribe","product_ids":${instruments},"channels":${channels}}'
+stream_format = "${channel}"
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "matches"
+
+[[venues.subscriptions]]
+instrument = "BTC-USD"
+canonical_symbol = "BTC/USD"
+data_types = ["trade"]
+
+[[venues.subscriptions]]
+instrument = "ETH-USD"
+canonical_symbol = "ETH/USD"
+data_types = ["trade"]
+
+# ── Crypto.com (Spot) ───────────────────────────
+
+[[venues]]
+id = "crypto-com"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://stream.crypto.com/exchange/v1/market"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 25
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+batch_subscribe_template = '{"id":1,"method":"subscribe","params":{"channels":${params}}}'
+stream_format = "${channel}.${instrument}"
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "trade"
+
+[[venues.subscriptions]]
+instrument = "BTC_USDT"
+canonical_symbol = "BTC/USDT"
+data_types = ["trade"]
+
+[[venues.subscriptions]]
+instrument = "ETH_USDT"
+canonical_symbol = "ETH/USDT"
+data_types = ["trade"]
+
+# ── Gate.io (Spot) ──────────────────────────────
+
+[[venues]]
+id = "gate"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://api.gateio.ws/ws/v4/"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 25
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+subscribe_template = '{"time":0,"channel":"${channel}","event":"subscribe","payload":["${instrument}"]}'
+stream_format = "${channel}"
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "spot.trades"
+
+[[venues.subscriptions]]
+instrument = "BTC_USDT"
+canonical_symbol = "BTC/USDT"
+data_types = ["trade"]
+
+[[venues.subscriptions]]
+instrument = "ETH_USDT"
+canonical_symbol = "ETH/USDT"
+data_types = ["trade"]
+
+# ── Kraken (Spot) ───────────────────────────────
+
+[[venues]]
+id = "kraken"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://ws.kraken.com/v2"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 30
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+subscribe_mode = "per_channel"
+subscribe_template = '{"method":"subscribe","params":{"channel":"${channel}","symbol":${instruments}}}'
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "trade"
+
+[[venues.subscriptions]]
+instrument = "BTC/USD"
+canonical_symbol = "BTC/USD"
+data_types = ["trade"]
+
+[[venues.subscriptions]]
+instrument = "ETH/USD"
+canonical_symbol = "ETH/USD"
+data_types = ["trade"]
+
+# ── OKX (Spot) ──────────────────────────────────
+
+[[venues]]
+id = "okx"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://ws.okx.com:8443/ws/v5/public"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 25
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+batch_subscribe_template = '{"op":"subscribe","args":${params}}'
+args_format = "object"
+stream_format = '{"channel":"${channel}","instId":"${instrument}"}'
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "trades"
+
+[[venues.subscriptions]]
+instrument = "BTC-USDT"
+canonical_symbol = "BTC/USDT"
+data_types = ["trade"]
+
+[[venues.subscriptions]]
+instrument = "ETH-USDT"
+canonical_symbol = "ETH/USDT"
+data_types = ["trade"]

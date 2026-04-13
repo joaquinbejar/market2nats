@@ -33,7 +33,7 @@ shutdown_timeout_ms = 5000
 format = "json"
 
 [nats]
-urls = ["nats://localhost:4222"]
+urls = ["${NATS_URL:-nats://localhost:4222}"]
 connect_timeout_ms = 5000
 reconnect_buffer_size = 8388608
 max_reconnects = -1
