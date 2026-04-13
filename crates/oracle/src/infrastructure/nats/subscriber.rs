@@ -5,6 +5,7 @@ use dashmap::DashMap;
 use futures_util::StreamExt;
 use market2nats_domain::{CanonicalSymbol, MarketDataEnvelope, MarketDataPayload, Timestamp};
 
+use crate::application::metrics::ORACLE_TRADE_MESSAGES_RECEIVED;
 use crate::application::ports::TradeSource;
 use crate::config::model::SubscriptionEntry;
 use crate::domain::{OracleError, PriceSource};
@@ -153,7 +154,15 @@ impl NatsTradeSubscriber {
             age_ms,
         };
 
-        self.sources.insert((symbol_normalized, venue_str), source);
+        self.sources
+            .insert((symbol_normalized.clone(), venue_str.clone()), source);
+
+        metrics::counter!(
+            ORACLE_TRADE_MESSAGES_RECEIVED,
+            "venue" => venue_str,
+            "instrument" => symbol_normalized
+        )
+        .increment(1);
     }
 
     /// Returns a clone of the internal sources map for use in spawned tasks.
