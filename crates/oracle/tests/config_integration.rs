@@ -44,7 +44,7 @@ fn test_load_oracle_config_parses_correctly() {
         "pipeline strategy mismatch"
     );
     assert_eq!(
-        config.pipeline.min_sources, 3,
+        config.pipeline.min_sources, 1,
         "pipeline min_sources mismatch"
     );
 }

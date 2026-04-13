@@ -94,6 +94,7 @@ mod tests {
                 name: "oracle".to_owned(),
                 log_level: "info".to_owned(),
                 log_format: "json".to_owned(),
+                http_port: 9091,
             },
             nats: NatsConfig {
                 urls: vec!["nats://localhost:4222".to_owned()],

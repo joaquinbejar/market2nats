@@ -7,6 +7,18 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use market2nats_domain::{CanonicalSymbol, ServiceHealth};
+use serde::Serialize;
+
+/// Health status for a single symbol.
+#[derive(Debug, Clone, Serialize)]
+pub struct SymbolHealth {
+    /// Normalized symbol key (e.g. "btc-usdt").
+    pub symbol: String,
+    /// Health status for this symbol.
+    pub status: ServiceHealth,
+    /// Milliseconds since the last successful computation, if any.
+    pub staleness_ms: Option<u64>,
+}
 
 /// Monitors oracle computation health per symbol.
 ///
@@ -47,6 +59,33 @@ impl OracleHealthMonitor {
             .get(&symbol.normalized())
             .map(|instant| instant.elapsed() < threshold)
             .unwrap_or(false)
+    }
+
+    /// Returns per-symbol health status with staleness information.
+    #[must_use]
+    pub fn per_symbol_health(&self) -> Vec<SymbolHealth> {
+        let threshold = self
+            .publish_interval
+            .checked_mul(2)
+            .unwrap_or(self.publish_interval);
+
+        self.last_computation
+            .iter()
+            .map(|entry| {
+                let elapsed = entry.value().elapsed();
+                let staleness_ms = elapsed.as_millis() as u64;
+                let status = if elapsed < threshold {
+                    ServiceHealth::Healthy
+                } else {
+                    ServiceHealth::Unhealthy
+                };
+                SymbolHealth {
+                    symbol: entry.key().clone(),
+                    status,
+                    staleness_ms: Some(staleness_ms),
+                }
+            })
+            .collect()
     }
 
     /// Returns overall service health.
@@ -140,5 +179,27 @@ mod tests {
         let monitor = OracleHealthMonitor::new(Duration::from_secs(10));
         let symbol = CanonicalSymbol::try_new("SOL/USDT").unwrap();
         assert!(!monitor.is_healthy(&symbol));
+    }
+
+    #[test]
+    fn test_per_symbol_health_returns_entries() {
+        let monitor = OracleHealthMonitor::new(Duration::from_secs(10));
+        let btc = CanonicalSymbol::try_new("BTC/USDT").unwrap();
+        let eth = CanonicalSymbol::try_new("ETH/USDT").unwrap();
+        monitor.record_computation(&btc);
+        monitor.record_computation(&eth);
+
+        let health = monitor.per_symbol_health();
+        assert_eq!(health.len(), 2);
+        for entry in &health {
+            assert_eq!(entry.status, ServiceHealth::Healthy);
+            assert!(entry.staleness_ms.is_some());
+        }
+    }
+
+    #[test]
+    fn test_per_symbol_health_empty_when_no_computations() {
+        let monitor = OracleHealthMonitor::new(Duration::from_secs(10));
+        assert!(monitor.per_symbol_health().is_empty());
     }
 }

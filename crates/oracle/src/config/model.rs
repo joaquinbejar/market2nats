@@ -33,6 +33,9 @@ pub struct ServiceConfig {
     /// Log output format: "json" or "text".
     #[serde(default = "default_log_format")]
     pub log_format: String,
+    /// HTTP port for the health/metrics server.
+    #[serde(default = "default_http_port")]
+    pub http_port: u16,
 }
 
 /// NATS connection configuration.
@@ -133,6 +136,12 @@ fn default_log_format() -> String {
     "json".to_owned()
 }
 
+/// Default HTTP port: 9091.
+#[inline]
+fn default_http_port() -> u16 {
+    9091
+}
+
 /// Default auth method: "none".
 #[inline]
 fn default_auth() -> String {
@@ -208,6 +217,7 @@ subject_pattern = "oracle.<symbol_normalized>.price"
         assert_eq!(config.pipeline.twap_window_ms, 30_000);
         assert_eq!(config.publish.format, "json");
         assert_eq!(config.publish.publish_interval_ms, 1_000);
+        assert_eq!(config.service.http_port, 9091);
     }
 
     #[test]

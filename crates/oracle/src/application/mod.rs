@@ -10,7 +10,7 @@ pub mod oracle_service;
 /// trade data ingestion and oracle price publishing.
 pub mod ports;
 
-pub use health::OracleHealthMonitor;
+pub use health::{OracleHealthMonitor, SymbolHealth};
 pub use metrics::register_metrics;
 pub use oracle_service::OracleService;
 pub use ports::{OraclePublisher, TradeSource};

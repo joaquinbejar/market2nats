@@ -15,7 +15,7 @@ use oracle::application::{OracleHealthMonitor, OracleService, register_metrics};
 use oracle::config;
 use oracle::config::builder::build_pipeline;
 use oracle::domain::OracleError;
-use oracle::infrastructure::{NatsTradeSubscriber, OraclePricePublisher};
+use oracle::infrastructure::{NatsTradeSubscriber, OraclePricePublisher, connect_nats};
 
 /// Service error aggregating all layer errors for the oracle binary.
 #[derive(Debug, thiserror::Error)]
@@ -56,11 +56,7 @@ async fn main() -> Result<(), ServiceError> {
     register_metrics();
 
     // Connect to NATS.
-    let nats_url = app_config.nats.urls.join(",");
-    let nats_client = async_nats::connect(&nats_url)
-        .await
-        .map_err(|e| OracleError::nats(format!("connect to {nats_url}: {e}")))?;
-    info!("connected to NATS");
+    let nats_client = connect_nats(&app_config.nats).await?;
 
     // Build the subscriber (implements TradeSource).
     let subscriber = Arc::new(NatsTradeSubscriber::new(&app_config.subscriptions)?);
@@ -123,10 +119,11 @@ async fn main() -> Result<(), ServiceError> {
     };
 
     // HTTP health + metrics server.
+    let http_port = app_config.service.http_port;
     let http_handle = {
         let health = Arc::clone(&health_monitor);
         tokio::spawn(async move {
-            if let Err(e) = run_http_server(health, prom_handle).await {
+            if let Err(e) = run_http_server(health, prom_handle, http_port).await {
                 tracing::error!(error = %e, "HTTP server failed");
             }
         })
@@ -157,10 +154,11 @@ async fn main() -> Result<(), ServiceError> {
     Ok(())
 }
 
-/// Runs the HTTP health and metrics server on port 9091.
+/// Runs the HTTP health and metrics server on the configured port.
 async fn run_http_server(
     health: Arc<OracleHealthMonitor>,
     prom_handle: metrics_exporter_prometheus::PrometheusHandle,
+    port: u16,
 ) -> Result<(), std::io::Error> {
     use axum::Router;
     use axum::routing::get;
@@ -172,6 +170,7 @@ async fn run_http_server(
                 let h = health.clone();
                 async move {
                     let status = h.overall_health();
+                    let symbols = h.per_symbol_health();
                     let code = if status == ServiceHealth::Healthy {
                         axum::http::StatusCode::OK
                     } else {
@@ -179,7 +178,10 @@ async fn run_http_server(
                     };
                     (
                         code,
-                        axum::Json(serde_json::json!({"status": status.to_string()})),
+                        axum::Json(serde_json::json!({
+                            "status": status.to_string(),
+                            "symbols": symbols,
+                        })),
                     )
                 }
             }),
@@ -192,8 +194,9 @@ async fn run_http_server(
             }),
         );
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:9091").await?;
-    info!(addr = "0.0.0.0:9091", "HTTP health/metrics server started");
+    let addr = format!("0.0.0.0:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    info!(addr = %addr, "HTTP health/metrics server started");
     axum::serve(listener, app).await?;
     Ok(())
 }

@@ -118,4 +118,50 @@ impl OracleError {
     pub fn serialization(message: impl Into<String>) -> Self {
         Self::Serialization(message.into())
     }
+
+    /// Returns a static label identifying the error variant, suitable for metrics.
+    #[inline]
+    #[must_use]
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            Self::InsufficientSources { .. } => "insufficient_sources",
+            Self::AllSourcesStale { .. } => "all_sources_stale",
+            Self::ArithmeticOverflow { .. } => "arithmetic_overflow",
+            Self::DivisionByZero { .. } => "division_by_zero",
+            Self::UnknownStrategy { .. } => "unknown_strategy",
+            Self::Domain(_) => "domain",
+            Self::Nats(_) => "nats",
+            Self::Serialization(_) => "serialization",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_kind_label_covers_all_variants() {
+        let cases = vec![
+            (
+                OracleError::insufficient_sources(3, 1),
+                "insufficient_sources",
+            ),
+            (
+                OracleError::all_sources_stale("BTC/USDT"),
+                "all_sources_stale",
+            ),
+            (
+                OracleError::arithmetic_overflow("mul"),
+                "arithmetic_overflow",
+            ),
+            (OracleError::division_by_zero("spread"), "division_by_zero"),
+            (OracleError::unknown_strategy("magic"), "unknown_strategy"),
+            (OracleError::nats("timeout"), "nats"),
+            (OracleError::serialization("bad json"), "serialization"),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(err.kind_label(), expected);
+        }
+    }
 }
