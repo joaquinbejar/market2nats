@@ -31,9 +31,15 @@ impl OraclePricePublisher {
     /// Resolves the NATS subject by replacing the `<symbol_normalized>` placeholder.
     #[must_use]
     fn resolve_subject(&self, price: &OraclePrice) -> String {
-        self.subject_pattern
-            .replace("<symbol_normalized>", &price.symbol.normalized())
+        resolve_subject_for_pattern(&self.subject_pattern, price)
     }
+}
+
+/// Resolves the NATS subject by replacing `<symbol_normalized>` in the pattern
+/// with the normalized canonical symbol from the given oracle price.
+#[must_use]
+fn resolve_subject_for_pattern(pattern: &str, price: &OraclePrice) -> String {
+    pattern.replace("<symbol_normalized>", &price.symbol.normalized())
 }
 
 impl OraclePublisher for OraclePricePublisher {
@@ -73,29 +79,42 @@ impl OraclePublisher for OraclePricePublisher {
 
 #[cfg(test)]
 mod tests {
-    use market2nats_domain::CanonicalSymbol;
+    use market2nats_domain::{CanonicalSymbol, Price, Timestamp};
+    use rust_decimal_macros::dec;
+
+    use super::resolve_subject_for_pattern;
+    use crate::domain::{AggregationStrategyKind, OracleConfidence, OraclePrice};
+
+    /// Helper to build a minimal `OraclePrice` for subject resolution tests.
+    fn make_oracle_price(symbol: &str) -> OraclePrice {
+        OraclePrice {
+            symbol: CanonicalSymbol::try_new(symbol).unwrap(),
+            price: Price::try_new(dec!(50000)).unwrap(),
+            timestamp: Timestamp::now(),
+            sources: vec![],
+            strategy: AggregationStrategyKind::Median,
+            confidence: OracleConfidence::Low,
+        }
+    }
 
     #[test]
     fn test_resolve_subject_replaces_placeholder() {
-        let pattern = "oracle.<symbol_normalized>.price";
-        let symbol = CanonicalSymbol::try_new("BTC/USDT").unwrap();
-        let resolved = pattern.replace("<symbol_normalized>", &symbol.normalized());
+        let price = make_oracle_price("BTC/USDT");
+        let resolved = resolve_subject_for_pattern("oracle.<symbol_normalized>.price", &price);
         assert_eq!(resolved, "oracle.btc-usdt.price");
     }
 
     #[test]
     fn test_resolve_subject_eth() {
-        let pattern = "oracle.<symbol_normalized>.price";
-        let symbol = CanonicalSymbol::try_new("ETH/USDT").unwrap();
-        let resolved = pattern.replace("<symbol_normalized>", &symbol.normalized());
+        let price = make_oracle_price("ETH/USDT");
+        let resolved = resolve_subject_for_pattern("oracle.<symbol_normalized>.price", &price);
         assert_eq!(resolved, "oracle.eth-usdt.price");
     }
 
     #[test]
     fn test_resolve_subject_no_placeholder() {
-        let pattern = "oracle.fixed.price";
-        let symbol = CanonicalSymbol::try_new("BTC/USDT").unwrap();
-        let resolved = pattern.replace("<symbol_normalized>", &symbol.normalized());
+        let price = make_oracle_price("BTC/USDT");
+        let resolved = resolve_subject_for_pattern("oracle.fixed.price", &price);
         assert_eq!(resolved, "oracle.fixed.price");
     }
 }

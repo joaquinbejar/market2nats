@@ -6,7 +6,7 @@ use market2nats_domain::CanonicalSymbol;
 use crate::domain::{OracleError, OraclePrice, PriceSource};
 
 /// Boxed future type alias for async trait methods without `async_trait` macro.
-type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Provides current price sources for a given symbol.
 ///

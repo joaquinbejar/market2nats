@@ -84,8 +84,8 @@ impl NatsTradeSubscriber {
             tokio::select! {
                 biased;
 
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
+                result = shutdown.changed() => {
+                    if result.is_err() || *shutdown.borrow() {
                         tracing::info!(symbol = %symbol, "shutdown received, stopping subscriber");
                         break;
                     }
