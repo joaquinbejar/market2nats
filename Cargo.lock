@@ -1402,6 +1402,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "oracle"
+version = "0.1.0"
+dependencies = [
+ "market2nats-domain",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
