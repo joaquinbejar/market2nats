@@ -1,7 +1,8 @@
 //! Oracle binary entrypoint.
 //!
 //! Connects to NATS, subscribes to trade subjects, runs periodic oracle
-//! price computation, and exposes health/metrics on HTTP.
+//! price computation, and exposes health/metrics on HTTP. Optionally starts
+//! a WebSocket server for real-time oracle price fan-out to connected clients.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,7 +16,9 @@ use oracle::application::{OracleHealthMonitor, OracleService, register_metrics};
 use oracle::config;
 use oracle::config::builder::build_pipeline;
 use oracle::domain::OracleError;
-use oracle::infrastructure::{NatsTradeSubscriber, OraclePricePublisher, connect_nats};
+use oracle::infrastructure::{
+    FanOutPublisher, NatsTradeSubscriber, OraclePricePublisher, OracleWsServer, connect_nats,
+};
 
 /// Service error aggregating all layer errors for the oracle binary.
 #[derive(Debug, thiserror::Error)]
@@ -61,11 +64,51 @@ async fn main() -> Result<(), ServiceError> {
     // Build the subscriber (implements TradeSource).
     let subscriber = Arc::new(NatsTradeSubscriber::new(&app_config.subscriptions)?);
 
-    // Build the publisher (implements OraclePublisher).
-    let publisher = Arc::new(OraclePricePublisher::new(
+    // Build the NATS publisher.
+    let nats_publisher = Arc::new(OraclePricePublisher::new(
         nats_client.clone(),
         app_config.publish.subject_pattern.clone(),
     ));
+
+    // Shutdown channel.
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    // Optionally build the WebSocket server and compose with FanOutPublisher.
+    let ws_server: Option<Arc<OracleWsServer>> = if app_config.websocket.enabled {
+        let server = Arc::new(OracleWsServer::new());
+        let ws_port = app_config.websocket.port;
+        let ws_path = app_config.websocket.path.clone();
+        let server_run = Arc::clone(&server);
+        let ws_shutdown = shutdown_rx.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = server_run.run(ws_port, &ws_path, ws_shutdown).await {
+                tracing::error!(error = %e, "WebSocket server failed");
+            }
+        });
+
+        info!(
+            port = ws_port,
+            path = %app_config.websocket.path,
+            "WebSocket server enabled"
+        );
+        Some(server)
+    } else {
+        None
+    };
+
+    // Build the composite publisher: NATS always, plus WebSocket if enabled.
+    // Always use FanOutPublisher so the service has a single concrete type.
+    let publisher = if let Some(ref ws) = ws_server {
+        Arc::new(FanOutPublisher::new(vec![
+            nats_publisher as Arc<dyn oracle::application::OraclePublisher>,
+            Arc::clone(ws) as Arc<dyn oracle::application::OraclePublisher>,
+        ]))
+    } else {
+        Arc::new(FanOutPublisher::new(vec![
+            nats_publisher as Arc<dyn oracle::application::OraclePublisher>,
+        ]))
+    };
 
     // Build pipelines: one per configured subscription symbol.
     let mut pipelines = HashMap::new();
@@ -80,9 +123,6 @@ async fn main() -> Result<(), ServiceError> {
         let pipeline = build_pipeline(&app_config.pipeline)?;
         pipelines.insert(symbol, pipeline);
     }
-
-    // Shutdown channel.
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Subscribe to NATS subjects and spawn listener tasks.
     for sub in &app_config.subscriptions {
@@ -122,8 +162,9 @@ async fn main() -> Result<(), ServiceError> {
     let http_port = app_config.service.http_port;
     let http_handle = {
         let health = Arc::clone(&health_monitor);
+        let ws_ref = ws_server.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_http_server(health, prom_handle, http_port).await {
+            if let Err(e) = run_http_server(health, ws_ref, prom_handle, http_port).await {
                 tracing::error!(error = %e, "HTTP server failed");
             }
         })
@@ -157,6 +198,7 @@ async fn main() -> Result<(), ServiceError> {
 /// Runs the HTTP health and metrics server on the configured port.
 async fn run_http_server(
     health: Arc<OracleHealthMonitor>,
+    ws_server: Option<Arc<OracleWsServer>>,
     prom_handle: metrics_exporter_prometheus::PrometheusHandle,
     port: u16,
 ) -> Result<(), std::io::Error> {
@@ -168,6 +210,7 @@ async fn run_http_server(
             "/health",
             get(move || {
                 let h = health.clone();
+                let ws = ws_server.clone();
                 async move {
                     let status = h.overall_health();
                     let symbols = h.per_symbol_health();
@@ -176,11 +219,20 @@ async fn run_http_server(
                     } else {
                         axum::http::StatusCode::SERVICE_UNAVAILABLE
                     };
+
+                    let ws_info = ws.map(|s| {
+                        serde_json::json!({
+                            "enabled": true,
+                            "connected_clients": s.connected_clients(),
+                        })
+                    });
+
                     (
                         code,
                         axum::Json(serde_json::json!({
                             "status": status.to_string(),
                             "symbols": symbols,
+                            "websocket": ws_info,
                         })),
                     )
                 }

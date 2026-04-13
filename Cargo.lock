@@ -1412,6 +1412,7 @@ dependencies = [
  "market2nats-domain",
  "metrics",
  "metrics-exporter-prometheus",
+ "portpicker",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
