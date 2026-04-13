@@ -19,9 +19,8 @@ services:
       start_period: 2s
 
   market2nats:
-    build:
-      context: ..
-      dockerfile: Docker/market2nats.Dockerfile
+    image: ghcr.io/joaquinbejar/market2nats:latest
+    command: ["/etc/market2nats/relay.all-spot-trades.toml"]
     ports:
       - "8080:8080"
     depends_on:
@@ -31,9 +30,7 @@ services:
       - NATS_URL=nats://nats:4222
 
   oracle:
-    build:
-      context: ..
-      dockerfile: Docker/oracle.Dockerfile
+    image: ghcr.io/joaquinbejar/oracle:latest
     ports:
       - "9091:9091"
     depends_on:
