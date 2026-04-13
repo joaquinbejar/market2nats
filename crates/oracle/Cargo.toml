@@ -6,12 +6,17 @@ description = "Aggregated oracle price computation from multi-venue trade data"
 license = "MIT"
 repository = "https://github.com/joaquinbejar/market2nats"
 
+[features]
+config = ["dep:toml"]
+
 [dependencies]
 market2nats-domain = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+toml = { workspace = true, optional = true }
 
 [dev-dependencies]
 rust_decimal_macros = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
