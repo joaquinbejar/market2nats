@@ -29,6 +29,9 @@ enum ServiceError {
     /// I/O error (e.g., HTTP server bind failure).
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// Metrics recorder installation failed.
+    #[error("metrics: {0}")]
+    Metrics(String),
 }
 
 #[tokio::main]
@@ -49,7 +52,7 @@ async fn main() -> Result<(), ServiceError> {
     // Install Prometheus metrics recorder.
     let prom_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
         .install_recorder()
-        .map_err(|e| OracleError::nats(format!("failed to install metrics recorder: {e}")))?;
+        .map_err(|e| ServiceError::Metrics(format!("failed to install metrics recorder: {e}")))?;
     register_metrics();
 
     // Connect to NATS.
@@ -72,6 +75,12 @@ async fn main() -> Result<(), ServiceError> {
     let mut pipelines = HashMap::new();
     for sub in &app_config.subscriptions {
         let symbol = CanonicalSymbol::try_new(&sub.symbol).map_err(OracleError::Domain)?;
+        if pipelines.contains_key(&symbol) {
+            return Err(OracleError::nats(format!(
+                "duplicate subscription symbol in config: {symbol}"
+            ))
+            .into());
+        }
         let pipeline = build_pipeline(&app_config.pipeline)?;
         pipelines.insert(symbol, pipeline);
     }
@@ -130,8 +139,11 @@ async fn main() -> Result<(), ServiceError> {
         _ = tokio::signal::ctrl_c() => {
             info!("received ctrl-c, initiating shutdown");
         }
-        _ = wait_for_sigterm() => {
-            info!("received sigterm, initiating shutdown");
+        result = wait_for_sigterm() => {
+            match result {
+                Ok(()) => info!("received sigterm, initiating shutdown"),
+                Err(e) => tracing::error!(error = %e, "failed to register sigterm handler"),
+            }
         }
     }
 
@@ -212,14 +224,15 @@ fn init_tracing(log_level: &str, log_format: &str) {
 
 /// Waits for a SIGTERM signal (Unix only).
 #[cfg(unix)]
-async fn wait_for_sigterm() {
-    let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("failed to register sigterm handler");
+async fn wait_for_sigterm() -> Result<(), std::io::Error> {
+    let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     signal.recv().await;
+    Ok(())
 }
 
 /// On non-Unix platforms, this just waits forever (ctrl-c handles shutdown).
 #[cfg(not(unix))]
-async fn wait_for_sigterm() {
+async fn wait_for_sigterm() -> Result<(), std::io::Error> {
     std::future::pending::<()>().await;
+    Ok(())
 }

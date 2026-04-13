@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use market2nats_domain::CanonicalSymbol;
-use metrics::{counter, gauge};
+use market2nats_domain::{CanonicalSymbol, Timestamp};
+use metrics::{counter, gauge, histogram};
 use tokio::sync::watch;
 
 use super::health::OracleHealthMonitor;
@@ -69,6 +69,7 @@ impl<T: TradeSource, P: OraclePublisher> OracleService<T, P> {
     #[tracing::instrument(skip(self, shutdown), fields(symbols = self.pipelines.len()))]
     pub async fn run(&self, mut shutdown: watch::Receiver<bool>) {
         let mut interval = tokio::time::interval(self.publish_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // The first tick fires immediately; consume it.
         interval.tick().await;
 
@@ -108,11 +109,11 @@ impl<T: TradeSource, P: OraclePublisher> OracleService<T, P> {
                 .set(sources.len() as f64);
 
             let start = Instant::now();
-            let result = pipeline.compute(symbol, &sources);
+            let result = pipeline.compute(symbol, &sources, Timestamp::now());
             let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-            gauge!(ORACLE_COMPUTATION_LATENCY_MS, "symbol" => symbol_normalized.clone())
-                .set(elapsed_ms);
+            histogram!(ORACLE_COMPUTATION_LATENCY_MS, "symbol" => symbol_normalized.clone())
+                .record(elapsed_ms);
 
             match result {
                 Ok(oracle_price) => {
@@ -240,7 +241,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_oracle_service_runs_and_publishes() {
         use crate::config::builder::build_pipeline;
         use crate::config::model::PipelineConfig;
@@ -283,7 +284,7 @@ mod tests {
             service.run(rx).await;
         });
 
-        // Let it run a few ticks.
+        // With start_paused, sleep auto-advances the clock deterministically.
         tokio::time::sleep(Duration::from_millis(200)).await;
         let _ = tx.send(true);
         let _ = handle.await;
@@ -291,7 +292,7 @@ mod tests {
         assert!(publisher.publish_count.load(Ordering::Relaxed) >= 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_oracle_service_records_errors_on_insufficient_sources() {
         use crate::config::builder::build_pipeline;
         use crate::config::model::PipelineConfig;

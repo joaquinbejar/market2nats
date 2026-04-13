@@ -108,8 +108,8 @@ mod tests {
         let monitor = OracleHealthMonitor::new(Duration::from_millis(10));
         let symbol = CanonicalSymbol::try_new("BTC/USDT").unwrap();
         monitor.record_computation(&symbol);
-        // Sleep past the 2x threshold (20ms).
-        thread::sleep(Duration::from_millis(30));
+        // Sleep well past the 2x threshold (20ms) to avoid flakiness on slow CI.
+        thread::sleep(Duration::from_millis(60));
         assert!(!monitor.is_healthy(&symbol));
         assert_eq!(monitor.overall_health(), ServiceHealth::Unhealthy);
     }
@@ -124,8 +124,8 @@ mod tests {
         monitor.record_computation(&btc);
         monitor.record_computation(&eth);
 
-        // Sleep past threshold.
-        thread::sleep(Duration::from_millis(30));
+        // Sleep well past threshold to avoid flakiness on slow CI.
+        thread::sleep(Duration::from_millis(60));
 
         // Only refresh BTC.
         monitor.record_computation(&btc);

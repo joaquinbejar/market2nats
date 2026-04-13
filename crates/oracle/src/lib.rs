@@ -7,4 +7,5 @@ pub mod config;
 /// for computing aggregated prices from multi-venue trade data.
 pub mod domain;
 /// Infrastructure layer: NATS subscriber and publisher implementations.
+#[cfg(feature = "config")]
 pub mod infrastructure;

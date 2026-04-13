@@ -2,7 +2,7 @@
 //!
 //! All metric names are defined as `pub const` for use throughout the service.
 
-use metrics::{describe_counter, describe_gauge};
+use metrics::{describe_counter, describe_gauge, describe_histogram};
 
 /// Total number of oracle prices successfully computed and published.
 pub const ORACLE_PRICE_COMPUTED: &str = "oracle_price_computed_total";
@@ -33,7 +33,7 @@ pub fn register_metrics() {
         ORACLE_PRICE_SPREAD_BPS,
         "Spread between min and max source in basis points"
     );
-    describe_gauge!(
+    describe_histogram!(
         ORACLE_COMPUTATION_LATENCY_MS,
         "Oracle computation latency in milliseconds"
     );

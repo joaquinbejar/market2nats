@@ -37,12 +37,14 @@ RUN cargo build --release -p oracle --bin oracle
 
 FROM alpine:3.23
 
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates && \
+    mkdir -p /etc/market2nats config
 
 COPY --from=builder /app/target/release/market2nats /usr/local/bin/market2nats
 COPY --from=builder /app/target/release/oracle /usr/local/bin/oracle
 COPY config/relay.toml /etc/market2nats/relay.toml
 COPY config/oracle.toml /etc/market2nats/oracle.toml
+COPY config/oracle.toml config/oracle.toml
 
 EXPOSE 8080
 EXPOSE 9091
