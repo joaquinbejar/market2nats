@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn test_kind_label_covers_all_variants() {
-        let cases = vec![
+        let cases: Vec<(OracleError, &str)> = vec![
             (
                 OracleError::insufficient_sources(3, 1),
                 "insufficient_sources",
@@ -157,6 +157,12 @@ mod tests {
             ),
             (OracleError::division_by_zero("spread"), "division_by_zero"),
             (OracleError::unknown_strategy("magic"), "unknown_strategy"),
+            (
+                OracleError::Domain(market2nats_domain::DomainError::EmptyField {
+                    field: "symbol",
+                }),
+                "domain",
+            ),
             (OracleError::nats("timeout"), "nats"),
             (OracleError::serialization("bad json"), "serialization"),
         ];

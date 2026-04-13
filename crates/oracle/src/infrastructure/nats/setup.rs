@@ -78,6 +78,8 @@ pub async fn connect_nats(config: &NatsConfig) -> Result<async_nats::Client, Ora
     }
 
     // TLS support.
+    // Note: tls_ca_file / tls_cert_file / tls_key_file are parsed by the config model
+    // but not yet wired into ConnectOptions — only tls_required is applied here.
     if config.tls_required == Some(true) {
         options = options.require_tls(true);
     }

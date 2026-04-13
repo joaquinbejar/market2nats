@@ -16,8 +16,8 @@ pub struct SymbolHealth {
     pub symbol: String,
     /// Health status for this symbol.
     pub status: ServiceHealth,
-    /// Milliseconds since the last successful computation, if any.
-    pub staleness_ms: Option<u64>,
+    /// Milliseconds since the last successful computation.
+    pub staleness_ms: u64,
 }
 
 /// Monitors oracle computation health per symbol.
@@ -82,7 +82,7 @@ impl OracleHealthMonitor {
                 SymbolHealth {
                     symbol: entry.key().clone(),
                     status,
-                    staleness_ms: Some(staleness_ms),
+                    staleness_ms,
                 }
             })
             .collect()
@@ -193,7 +193,8 @@ mod tests {
         assert_eq!(health.len(), 2);
         for entry in &health {
             assert_eq!(entry.status, ServiceHealth::Healthy);
-            assert!(entry.staleness_ms.is_some());
+            // staleness_ms is always present; just verify it's a sane value (< 1s).
+            assert!(entry.staleness_ms < 1_000);
         }
     }
 

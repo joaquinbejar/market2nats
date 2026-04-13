@@ -11,7 +11,7 @@ use tokio::sync::watch;
 use super::health::OracleHealthMonitor;
 use super::metrics::{
     ORACLE_COMPUTATION_ERRORS, ORACLE_COMPUTATION_LATENCY_MS, ORACLE_PRICE_COMPUTED,
-    ORACLE_PRICE_SPREAD_BPS, ORACLE_SOURCES_COUNT,
+    ORACLE_PRICE_SPREAD_BPS, ORACLE_PUBLISH_ERRORS, ORACLE_SOURCES_COUNT,
 };
 use super::ports::{OraclePublisher, TradeSource};
 use crate::domain::OraclePipeline;
@@ -132,9 +132,8 @@ impl<T: TradeSource, P: OraclePublisher> OracleService<T, P> {
                             "failed to publish oracle price"
                         );
                         counter!(
-                            ORACLE_COMPUTATION_ERRORS,
-                            "symbol" => symbol_normalized.clone(),
-                            "error_kind" => "publish_failed"
+                            ORACLE_PUBLISH_ERRORS,
+                            "symbol" => symbol_normalized.clone()
                         )
                         .increment(1);
                     } else {
