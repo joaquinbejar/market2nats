@@ -5,7 +5,7 @@ log_format = "json"
 http_port = 9091
 
 [nats]
-urls = ["nats://localhost:4222"]
+urls = ["${NATS_URL:-nats://localhost:4222}"]
 
 [[subscriptions]]
 symbol = "BTC/USDT"

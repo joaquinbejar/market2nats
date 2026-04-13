@@ -50,8 +50,9 @@ pub fn load_config(path: &str) -> Result<Arc<OracleConfig>, ConfigError> {
     Ok(Arc::new(config))
 }
 
-/// Replaces `${VAR_NAME}` patterns with the corresponding environment variable value.
-/// If the variable is not set, the placeholder is left as-is.
+/// Replaces `${VAR_NAME}` and `${VAR_NAME:-default}` patterns with the
+/// corresponding environment variable value. If the variable is not set
+/// and no default is provided, the placeholder is left as-is.
 #[must_use]
 fn substitute_env_vars(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
@@ -60,19 +61,29 @@ fn substitute_env_vars(input: &str) -> String {
     while let Some(ch) = chars.next() {
         if ch == '$' && chars.peek() == Some(&'{') {
             chars.next(); // consume '{'
-            let mut var_name = String::new();
+            let mut token = String::new();
             for c in chars.by_ref() {
                 if c == '}' {
                     break;
                 }
-                var_name.push(c);
+                token.push(c);
             }
-            match std::env::var(&var_name) {
+            // Support ${VAR:-default} syntax.
+            let (var_name, default_val) = if let Some(pos) = token.find(":-") {
+                (&token[..pos], Some(&token[pos + 2..]))
+            } else {
+                (token.as_str(), None)
+            };
+            match std::env::var(var_name) {
                 Ok(val) => result.push_str(&val),
                 Err(_) => {
-                    result.push_str("${");
-                    result.push_str(&var_name);
-                    result.push('}');
+                    if let Some(default) = default_val {
+                        result.push_str(default);
+                    } else {
+                        result.push_str("${");
+                        result.push_str(&token);
+                        result.push('}');
+                    }
                 }
             }
         } else {
@@ -103,6 +114,21 @@ mod tests {
     fn test_substitute_env_vars_missing_leaves_placeholder() {
         let result = substitute_env_vars("token = \"${NONEXISTENT_ORACLE_VAR_99999}\"");
         assert_eq!(result, "token = \"${NONEXISTENT_ORACLE_VAR_99999}\"");
+    }
+
+    #[test]
+    fn test_substitute_env_vars_default_value_when_missing() {
+        let result =
+            substitute_env_vars("url = \"${NONEXISTENT_ORACLE_99999:-nats://localhost:4222}\"");
+        assert_eq!(result, "url = \"nats://localhost:4222\"");
+    }
+
+    #[test]
+    fn test_substitute_env_vars_default_value_ignored_when_set() {
+        unsafe { std::env::set_var("TEST_ORACLE_DEFAULT", "nats://custom:4222") };
+        let result = substitute_env_vars("url = \"${TEST_ORACLE_DEFAULT:-nats://localhost:4222}\"");
+        assert_eq!(result, "url = \"nats://custom:4222\"");
+        unsafe { std::env::remove_var("TEST_ORACLE_DEFAULT") };
     }
 
     #[test]

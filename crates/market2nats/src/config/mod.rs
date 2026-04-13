@@ -44,8 +44,9 @@ pub fn load_config(path: &str) -> Result<Arc<AppConfig>, ConfigError> {
     Ok(Arc::new(config))
 }
 
-/// Replaces `${VAR_NAME}` patterns with the corresponding environment variable value.
-/// If the variable is not set, the placeholder is left as-is.
+/// Replaces `${VAR_NAME}` and `${VAR_NAME:-default}` patterns with the
+/// corresponding environment variable value. If the variable is not set
+/// and no default is provided, the placeholder is left as-is.
 #[must_use]
 fn substitute_env_vars(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
@@ -54,19 +55,29 @@ fn substitute_env_vars(input: &str) -> String {
     while let Some(ch) = chars.next() {
         if ch == '$' && chars.peek() == Some(&'{') {
             chars.next(); // consume '{'
-            let mut var_name = String::new();
+            let mut token = String::new();
             for c in chars.by_ref() {
                 if c == '}' {
                     break;
                 }
-                var_name.push(c);
+                token.push(c);
             }
-            match std::env::var(&var_name) {
+            // Support ${VAR:-default} syntax.
+            let (var_name, default_val) = if let Some(pos) = token.find(":-") {
+                (&token[..pos], Some(&token[pos + 2..]))
+            } else {
+                (token.as_str(), None)
+            };
+            match std::env::var(var_name) {
                 Ok(val) => result.push_str(&val),
                 Err(_) => {
-                    result.push_str("${");
-                    result.push_str(&var_name);
-                    result.push('}');
+                    if let Some(default) = default_val {
+                        result.push_str(default);
+                    } else {
+                        result.push_str("${");
+                        result.push_str(&token);
+                        result.push('}');
+                    }
                 }
             }
         } else {
