@@ -81,7 +81,9 @@ mod tests {
             make_source("b", dec!(102), dec!(1), 200),
             make_source("c", dec!(101), dec!(1), 150),
         ];
-        let result = pipeline.compute(&symbol, &sources, Timestamp::new(1_700_000_000_000)).expect("should compute");
+        let result = pipeline
+            .compute(&symbol, &sources, Timestamp::new(1_700_000_000_000))
+            .expect("should compute");
         assert_eq!(result.price.value(), dec!(101));
     }
 
@@ -95,7 +97,9 @@ mod tests {
             make_source("a", dec!(100), dec!(1), 100),
             make_source("b", dec!(102), dec!(1), 100),
         ];
-        let result = pipeline.compute(&symbol, &sources, Timestamp::new(1_700_000_000_000)).expect("should compute");
+        let result = pipeline
+            .compute(&symbol, &sources, Timestamp::new(1_700_000_000_000))
+            .expect("should compute");
         // Equal ages, equal weights -> simple average = 101
         assert_eq!(result.price.value(), dec!(101));
     }
@@ -110,7 +114,9 @@ mod tests {
             make_source("a", dec!(100), dec!(10), 100),
             make_source("b", dec!(102), dec!(10), 100),
         ];
-        let result = pipeline.compute(&symbol, &sources, Timestamp::new(1_700_000_000_000)).expect("should compute");
+        let result = pipeline
+            .compute(&symbol, &sources, Timestamp::new(1_700_000_000_000))
+            .expect("should compute");
         // Equal volumes -> simple average = 101
         assert_eq!(result.price.value(), dec!(101));
     }
@@ -125,7 +131,9 @@ mod tests {
             make_source("b", dec!(101), dec!(1), 200),
             make_source("c", dec!(102), dec!(1), 150),
         ];
-        let result = pipeline.compute(&symbol, &sources, Timestamp::new(1_700_000_000_000)).expect("should compute");
+        let result = pipeline
+            .compute(&symbol, &sources, Timestamp::new(1_700_000_000_000))
+            .expect("should compute");
         assert_eq!(result.price.value(), dec!(101));
     }
 
