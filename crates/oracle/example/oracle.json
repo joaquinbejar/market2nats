@@ -1,44 +1,58 @@
 {
-  "symbol": "ETH/USDT",
-  "price": "2205.22",
-  "timestamp": 1776094938600,
+  "symbol": "BTC/USDT",
+  "price": "71822",
+  "timestamp": 1776095751122,
   "sources": [
     {
-      "venue": "okx",
-      "price": "2205.39",
-      "quantity": "0.002851",
-      "timestamp": 1776094938309,
-      "age_ms": 291
-    },
-    {
-      "venue": "gate",
-      "price": "2205.16",
-      "quantity": "1.9281",
-      "timestamp": 1776094937000,
-      "age_ms": 1600
-    },
-    {
-      "venue": "crypto-com",
-      "price": "2204.71",
-      "quantity": "0.5869",
-      "timestamp": 1776094936950,
-      "age_ms": 1650
-    },
-    {
       "venue": "bybit",
-      "price": "2205.22",
-      "quantity": "0.52196",
-      "timestamp": 1776094937137,
-      "age_ms": 1463
+      "price": "71822",
+      "quantity": "0.000723",
+      "timestamp": 1776095748033,
+      "age_ms": 3089
+    },
+    {
+      "venue": "okx",
+      "price": "71820.1",
+      "quantity": "0.00001195",
+      "timestamp": 1776095751065,
+      "age_ms": 57
     },
     {
       "venue": "binance",
-      "price": "2205.27000000",
-      "quantity": "1.28030000",
-      "timestamp": 1776094937825,
-      "age_ms": 775
+      "price": "71819.79000000",
+      "quantity": "0.00250000",
+      "timestamp": 1776095750895,
+      "age_ms": 227
+    },
+    {
+      "venue": "crypto-com",
+      "price": "71829.88",
+      "quantity": "0.09000",
+      "timestamp": 1776095750698,
+      "age_ms": 424
+    },
+    {
+      "venue": "coinbase",
+      "price": "71844.95",
+      "quantity": "0.00024817",
+      "timestamp": 1776095750833,
+      "age_ms": 289
+    },
+    {
+      "venue": "gate",
+      "price": "71819.8",
+      "quantity": "0.000129",
+      "timestamp": 1776095750000,
+      "age_ms": 1122
+    },
+    {
+      "venue": "kraken",
+      "price": "71834.8",
+      "quantity": "0.00046451",
+      "timestamp": 1776095747891,
+      "age_ms": 3231
     }
   ],
   "strategy": "MEDIANFILTERED",
-  "confidence": "MEDIUM"
+  "confidence": "HIGH"
 }

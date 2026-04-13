@@ -290,7 +290,8 @@ reset_timeout_secs = 60
 half_open_max_requests = 2
 
 [venues.generic_ws]
-batch_subscribe_template = '{"method":"subscribe","params":{"channel":"${channel}","symbol":${params}}}'
+subscribe_mode = "per_channel"
+subscribe_template = '{"method":"subscribe","params":{"channel":"${channel}","symbol":${instruments}}}'
 message_format = "json"
 
 [venues.generic_ws.channel_map]
