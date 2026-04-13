@@ -31,6 +31,14 @@ pub enum ConfigValidationError {
         /// The symbol whose subscription has no subjects.
         symbol: String,
     },
+
+    /// The WebSocket port must be greater than 0 when enabled.
+    #[error("websocket.port must be > 0")]
+    InvalidWsPort,
+
+    /// The WebSocket path must start with '/'.
+    #[error("websocket.path must start with '/'")]
+    InvalidWsPath,
 }
 
 /// Validates the oracle configuration, returning all detected errors.
@@ -77,6 +85,16 @@ pub fn validate_config(config: &OracleConfig) -> Vec<ConfigValidationError> {
         errors.push(ConfigValidationError::MissingPlaceholder);
     }
 
+    // Validate WebSocket configuration when enabled.
+    if config.websocket.enabled {
+        if config.websocket.port == 0 {
+            errors.push(ConfigValidationError::InvalidWsPort);
+        }
+        if !config.websocket.path.starts_with('/') {
+            errors.push(ConfigValidationError::InvalidWsPath);
+        }
+    }
+
     errors
 }
 
@@ -85,6 +103,7 @@ mod tests {
     use super::*;
     use crate::config::model::{
         NatsConfig, OracleConfig, PipelineConfig, PublishConfig, ServiceConfig, SubscriptionEntry,
+        WebSocketConfig,
     };
 
     /// Builds a valid baseline config for mutation in individual tests.
@@ -125,6 +144,7 @@ mod tests {
                 format: "json".to_owned(),
                 publish_interval_ms: 1_000,
             },
+            websocket: WebSocketConfig::default(),
         }
     }
 
@@ -193,5 +213,60 @@ mod tests {
         assert!(errors.iter().any(
             |e| matches!(e, ConfigValidationError::EmptySubjects { symbol } if symbol == "ETH/USDT")
         ));
+    }
+
+    #[test]
+    fn test_validate_ws_port_zero_rejected_when_enabled() {
+        let mut config = valid_config();
+        config.websocket.enabled = true;
+        config.websocket.port = 0;
+        config.websocket.path = "/".to_owned();
+        let errors = validate_config(&config);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigValidationError::InvalidWsPort))
+        );
+    }
+
+    #[test]
+    fn test_validate_ws_path_no_leading_slash_rejected_when_enabled() {
+        let mut config = valid_config();
+        config.websocket.enabled = true;
+        config.websocket.port = 9092;
+        config.websocket.path = "ws".to_owned();
+        let errors = validate_config(&config);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigValidationError::InvalidWsPath))
+        );
+    }
+
+    #[test]
+    fn test_validate_ws_disabled_skips_validation() {
+        let mut config = valid_config();
+        config.websocket.enabled = false;
+        config.websocket.port = 0;
+        config.websocket.path = "no-slash".to_owned();
+        let errors = validate_config(&config);
+        // No websocket errors when disabled.
+        assert!(!errors.iter().any(|e| matches!(
+            e,
+            ConfigValidationError::InvalidWsPort | ConfigValidationError::InvalidWsPath
+        )));
+    }
+
+    #[test]
+    fn test_validate_ws_valid_when_enabled() {
+        let mut config = valid_config();
+        config.websocket.enabled = true;
+        config.websocket.port = 9092;
+        config.websocket.path = "/ws".to_owned();
+        let errors = validate_config(&config);
+        assert!(!errors.iter().any(|e| matches!(
+            e,
+            ConfigValidationError::InvalidWsPort | ConfigValidationError::InvalidWsPath
+        )));
     }
 }

@@ -22,6 +22,15 @@ pub const ORACLE_PUBLISH_ERRORS: &str = "oracle_publish_errors_total";
 /// Time taken to compute an oracle price, in milliseconds.
 pub const ORACLE_COMPUTATION_LATENCY_MS: &str = "oracle_computation_latency_ms";
 
+/// Number of currently connected WebSocket clients.
+pub const ORACLE_WS_CONNECTED_CLIENTS: &str = "oracle_ws_connected_clients";
+
+/// Total number of WebSocket messages sent to clients.
+pub const ORACLE_WS_MESSAGES_SENT: &str = "oracle_ws_messages_sent_total";
+
+/// Total number of trade messages received from NATS subscriptions.
+pub const ORACLE_TRADE_MESSAGES_RECEIVED: &str = "oracle_trade_messages_received_total";
+
 /// Registers all oracle metric descriptions with the global recorder.
 ///
 /// Must be called once after installing the Prometheus recorder.
@@ -41,4 +50,16 @@ pub fn register_metrics() {
         "Oracle computation latency in milliseconds"
     );
     describe_counter!(ORACLE_PUBLISH_ERRORS, "Total oracle publish errors");
+    describe_gauge!(
+        ORACLE_WS_CONNECTED_CLIENTS,
+        "Number of currently connected WebSocket clients"
+    );
+    describe_counter!(
+        ORACLE_WS_MESSAGES_SENT,
+        "Total WebSocket messages sent to clients"
+    );
+    describe_counter!(
+        ORACLE_TRADE_MESSAGES_RECEIVED,
+        "Total trade messages received from NATS subscriptions"
+    );
 }
