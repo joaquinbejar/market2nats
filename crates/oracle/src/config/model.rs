@@ -36,6 +36,9 @@ pub struct ServiceConfig {
 }
 
 /// NATS connection configuration.
+///
+/// Fields align with the market2nats `NatsConfig` conventions so that a single
+/// `[nats]` block can be shared across services.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NatsConfig {
@@ -47,9 +50,29 @@ pub struct NatsConfig {
     /// Token for token-based authentication.
     pub token: Option<String>,
     /// Username for user/password authentication.
-    pub user: Option<String>,
+    /// Accepts both `username` and `user` keys in TOML.
+    #[serde(default, alias = "user")]
+    pub username: Option<String>,
     /// Password for user/password authentication.
     pub password: Option<String>,
+    /// Human-readable connection name sent to the NATS server.
+    #[serde(default)]
+    pub connection_name: Option<String>,
+    /// Connect timeout in milliseconds.
+    #[serde(default)]
+    pub connect_timeout_ms: Option<u64>,
+    /// Whether TLS is required for the connection.
+    #[serde(default)]
+    pub tls_required: Option<bool>,
+    /// Path to the TLS CA certificate file.
+    #[serde(default)]
+    pub tls_ca_file: Option<String>,
+    /// Path to the TLS client certificate file.
+    #[serde(default)]
+    pub tls_cert_file: Option<String>,
+    /// Path to the TLS client key file.
+    #[serde(default)]
+    pub tls_key_file: Option<String>,
 }
 
 /// A subscription entry: a symbol and NATS subjects to consume.

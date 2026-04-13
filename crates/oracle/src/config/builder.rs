@@ -18,10 +18,17 @@ use super::model::PipelineConfig;
 pub fn build_pipeline(config: &PipelineConfig) -> Result<OraclePipeline, OracleError> {
     let kind = AggregationStrategyKind::from_str_config(&config.strategy)?;
 
-    let filters: Vec<Box<dyn crate::domain::filters::PriceFilter>> = vec![
-        Box::new(StalenessFilter::new(config.staleness_max_ms)),
-        Box::new(OutlierFilter::new(config.outlier_max_deviation_bps)),
-    ];
+    // MedianFilteredStrategy already performs outlier removal internally,
+    // so we only add StalenessFilter to avoid double-filtering.
+    let filters: Vec<Box<dyn crate::domain::filters::PriceFilter>> =
+        if kind == AggregationStrategyKind::MedianFiltered {
+            vec![Box::new(StalenessFilter::new(config.staleness_max_ms))]
+        } else {
+            vec![
+                Box::new(StalenessFilter::new(config.staleness_max_ms)),
+                Box::new(OutlierFilter::new(config.outlier_max_deviation_bps)),
+            ]
+        };
 
     let strategy: Box<dyn crate::domain::strategies::AggregationStrategy> = match kind {
         AggregationStrategyKind::Median => Box::new(MedianStrategy::new()),
@@ -74,7 +81,7 @@ mod tests {
             make_source("b", dec!(102), dec!(1), 200),
             make_source("c", dec!(101), dec!(1), 150),
         ];
-        let result = pipeline.compute(&symbol, &sources).expect("should compute");
+        let result = pipeline.compute(&symbol, &sources, Timestamp::new(1_700_000_000_000)).expect("should compute");
         assert_eq!(result.price.value(), dec!(101));
     }
 
@@ -88,7 +95,7 @@ mod tests {
             make_source("a", dec!(100), dec!(1), 100),
             make_source("b", dec!(102), dec!(1), 100),
         ];
-        let result = pipeline.compute(&symbol, &sources).expect("should compute");
+        let result = pipeline.compute(&symbol, &sources, Timestamp::new(1_700_000_000_000)).expect("should compute");
         // Equal ages, equal weights -> simple average = 101
         assert_eq!(result.price.value(), dec!(101));
     }
@@ -103,7 +110,7 @@ mod tests {
             make_source("a", dec!(100), dec!(10), 100),
             make_source("b", dec!(102), dec!(10), 100),
         ];
-        let result = pipeline.compute(&symbol, &sources).expect("should compute");
+        let result = pipeline.compute(&symbol, &sources, Timestamp::new(1_700_000_000_000)).expect("should compute");
         // Equal volumes -> simple average = 101
         assert_eq!(result.price.value(), dec!(101));
     }
@@ -118,7 +125,7 @@ mod tests {
             make_source("b", dec!(101), dec!(1), 200),
             make_source("c", dec!(102), dec!(1), 150),
         ];
-        let result = pipeline.compute(&symbol, &sources).expect("should compute");
+        let result = pipeline.compute(&symbol, &sources, Timestamp::new(1_700_000_000_000)).expect("should compute");
         assert_eq!(result.price.value(), dec!(101));
     }
 

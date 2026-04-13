@@ -85,10 +85,14 @@ fn substitute_env_vars(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
 
     #[test]
     fn test_substitute_env_vars_replaces() {
+        // Safety: test binary is single-threaded for env var mutation;
+        // this matches the market2nats convention for env var tests.
         unsafe { std::env::set_var("TEST_ORACLE_VAR", "secret") };
         let result = substitute_env_vars("token = \"${TEST_ORACLE_VAR}\"");
         assert_eq!(result, "token = \"secret\"");
@@ -103,8 +107,6 @@ mod tests {
 
     #[test]
     fn test_load_config_valid_toml_parses() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("oracle_test_valid.toml");
         let toml_content = r#"
 [service]
 name = "oracle"
@@ -127,20 +129,23 @@ min_sources = 2
 [publish]
 subject_pattern = "oracle.<symbol_normalized>.price"
 "#;
-        std::fs::write(&path, toml_content).expect("write temp file");
-        let config = load_config(path.to_str().expect("valid path")).expect("should load");
+        let mut tmp = tempfile::Builder::new()
+            .prefix("oracle_test")
+            .suffix(".toml")
+            .tempfile()
+            .expect("create temp file");
+        tmp.write_all(toml_content.as_bytes())
+            .expect("write temp file");
+        tmp.flush().expect("flush temp file");
+        let config = load_config(tmp.path().to_str().expect("valid path")).expect("should load");
         assert_eq!(config.service.name, "oracle");
         assert_eq!(config.subscriptions.len(), 2);
         assert_eq!(config.pipeline.strategy, "median");
         assert_eq!(config.pipeline.min_sources, 2);
-        // Clean up
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn test_load_config_defaults_applied() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("oracle_test_defaults.toml");
         let toml_content = r#"
 [service]
 name = "oracle"
@@ -158,8 +163,15 @@ strategy = "twap"
 [publish]
 subject_pattern = "oracle.<symbol_normalized>.price"
 "#;
-        std::fs::write(&path, toml_content).expect("write temp file");
-        let config = load_config(path.to_str().expect("valid path")).expect("should load");
+        let mut tmp = tempfile::Builder::new()
+            .prefix("oracle_test")
+            .suffix(".toml")
+            .tempfile()
+            .expect("create temp file");
+        tmp.write_all(toml_content.as_bytes())
+            .expect("write temp file");
+        tmp.flush().expect("flush temp file");
+        let config = load_config(tmp.path().to_str().expect("valid path")).expect("should load");
         assert_eq!(config.service.log_level, "info");
         assert_eq!(config.service.log_format, "json");
         assert_eq!(config.nats.auth, "none");
@@ -169,6 +181,5 @@ subject_pattern = "oracle.<symbol_normalized>.price"
         assert_eq!(config.pipeline.twap_window_ms, 30_000);
         assert_eq!(config.publish.format, "json");
         assert_eq!(config.publish.publish_interval_ms, 1_000);
-        let _ = std::fs::remove_file(&path);
     }
 }
