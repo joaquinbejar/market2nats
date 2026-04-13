@@ -1,0 +1,69 @@
+#
+# market2nats — Docker relay config
+#
+# Uses NATS_URL env var for the connection URL (with embedded credentials):
+#   NATS_URL=nats://user:password@host:4222
+#
+
+[service]
+name = "market2nats"
+log_level = "info"
+log_format = "json"
+shutdown_timeout_ms = 5000
+
+[nats]
+urls = ["${NATS_URL}"]
+connect_timeout_ms = 5000
+reconnect_buffer_size = 8388608
+max_reconnects = -1
+ping_interval_secs = 20
+
+[nats.tls]
+enabled = false
+
+[[nats.streams]]
+name = "MARKET_TRADES"
+subjects = ["market.*.*.trade"]
+storage = "file"
+retention = "limits"
+max_age_secs = 86400
+max_bytes = 1073741824
+max_msg_size = 65536
+discard = "old"
+num_replicas = 1
+duplicate_window_secs = 120
+
+[[venues]]
+id = "binance"
+adapter = "generic_ws"
+enabled = true
+
+[venues.connection]
+ws_url = "wss://stream.binance.com:9443/ws"
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 60000
+max_reconnect_attempts = 0
+ping_interval_secs = 30
+pong_timeout_secs = 10
+
+[venues.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 60
+half_open_max_requests = 2
+
+[venues.generic_ws]
+batch_subscribe_template = '{"method":"SUBSCRIBE","params":${params},"id":1}'
+message_format = "json"
+
+[venues.generic_ws.channel_map]
+trade = "trade"
+
+[[venues.subscriptions]]
+instrument = "btcusdt"
+canonical_symbol = "BTC/USDT"
+data_types = ["trade"]
+
+[[venues.subscriptions]]
+instrument = "ethusdt"
+canonical_symbol = "ETH/USDT"
+data_types = ["trade"]

@@ -34,7 +34,7 @@ FROM alpine:3.23
 RUN apk add --no-cache ca-certificates
 
 COPY --from=builder /app/target/release/market2nats /usr/local/bin/market2nats
-COPY config/relay.toml /etc/market2nats/relay.toml
+COPY config/docker-relay.toml /etc/market2nats/relay.toml
 
 EXPOSE 8080
 

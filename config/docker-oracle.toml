@@ -1,3 +1,10 @@
+#
+# oracle — Docker config
+#
+# Uses NATS_URL env var for the connection URL (with embedded credentials):
+#   NATS_URL=nats://user:password@host:4222
+#
+
 [service]
 name = "oracle"
 log_level = "info"
@@ -5,7 +12,7 @@ log_format = "json"
 http_port = 9091
 
 [nats]
-urls = ["nats://localhost:4222"]
+urls = ["${NATS_URL}"]
 
 [[subscriptions]]
 symbol = "BTC/USDT"

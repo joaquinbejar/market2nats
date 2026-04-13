@@ -29,8 +29,6 @@ services:
         condition: service_healthy
     environment:
       - NATS_URL=nats://nats:4222
-    volumes:
-      - ../config/relay.toml:/etc/market2nats/relay.toml:ro
 
   oracle:
     build:
@@ -43,8 +41,6 @@ services:
         condition: service_healthy
     environment:
       - NATS_URL=nats://nats:4222
-    volumes:
-      - ../config/oracle.toml:/etc/oracle/oracle.toml:ro
 
 volumes:
   nats-data:

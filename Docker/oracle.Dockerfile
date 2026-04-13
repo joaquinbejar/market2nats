@@ -34,7 +34,7 @@ FROM alpine:3.23
 RUN apk add --no-cache ca-certificates
 
 COPY --from=builder /app/target/release/oracle /usr/local/bin/oracle
-COPY config/oracle.toml /etc/oracle/oracle.toml
+COPY config/docker-oracle.toml /etc/oracle/oracle.toml
 
 EXPOSE 9091
 
