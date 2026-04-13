@@ -1,0 +1,44 @@
+{
+  "symbol": "ETH/USDT",
+  "price": "2205.22",
+  "timestamp": 1776094938600,
+  "sources": [
+    {
+      "venue": "okx",
+      "price": "2205.39",
+      "quantity": "0.002851",
+      "timestamp": 1776094938309,
+      "age_ms": 291
+    },
+    {
+      "venue": "gate",
+      "price": "2205.16",
+      "quantity": "1.9281",
+      "timestamp": 1776094937000,
+      "age_ms": 1600
+    },
+    {
+      "venue": "crypto-com",
+      "price": "2204.71",
+      "quantity": "0.5869",
+      "timestamp": 1776094936950,
+      "age_ms": 1650
+    },
+    {
+      "venue": "bybit",
+      "price": "2205.22",
+      "quantity": "0.52196",
+      "timestamp": 1776094937137,
+      "age_ms": 1463
+    },
+    {
+      "venue": "binance",
+      "price": "2205.27000000",
+      "quantity": "1.28030000",
+      "timestamp": 1776094937825,
+      "age_ms": 775
+    }
+  ],
+  "strategy": "MEDIANFILTERED",
+  "confidence": "MEDIUM"
+}

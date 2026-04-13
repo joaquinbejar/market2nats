@@ -10,13 +10,13 @@ urls = ["${NATS_URL:-nats://localhost:4222}"]
 [[subscriptions]]
 symbol = "BTC/USDT"
 subjects = [
-  "market.binance.btc-usdt.trade",
+  "market.*.btc-usdt.trade",
 ]
 
 [[subscriptions]]
 symbol = "ETH/USDT"
 subjects = [
-  "market.binance.eth-usdt.trade",
+  "market.*.eth-usdt.trade",
 ]
 
 [pipeline]
