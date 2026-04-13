@@ -66,6 +66,11 @@ pub async fn connect_nats(config: &NatsConfig) -> Result<async_nats::Client, Nat
         .connection_timeout(Duration::from_millis(config.connect_timeout_ms))
         .ping_interval(Duration::from_secs(config.ping_interval_secs));
 
+    // TLS support.
+    if config.tls.enabled {
+        options = options.require_tls(true);
+    }
+
     // Auth: URL-embedded credentials take priority, then explicit config fields.
     if let (Some(user), Some(pass)) = (url_user, url_pass) {
         options = options.user_and_password(user, pass);
