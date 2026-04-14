@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use async_nats::jetstream;
 use futures_util::StreamExt;
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::application::ports::{NatsError, NatsPublisher};
 use crate::config::model::{ConsumerConfig, StreamConfig};
@@ -152,8 +152,32 @@ impl NatsPublisher for JetStreamPublisher {
             };
 
             match self.jetstream.get_stream(&config.name).await {
-                Ok(_existing) => {
-                    debug!(stream = %config.name, "stream already exists");
+                Ok(existing) => {
+                    // Reconcile subjects: if the existing stream's subjects
+                    // drifted from what TOML declares, update in place.
+                    // Without this, a stream created by an older version of
+                    // the relay (or edited out-of-band) keeps routing only
+                    // its old subjects — every new subject hangs with "no
+                    // PubAck" until someone fixes it manually.
+                    let existing_subjects = &existing.cached_info().config.subjects;
+                    if existing_subjects != &config.subjects {
+                        info!(
+                            stream = %config.name,
+                            existing = ?existing_subjects,
+                            desired = ?config.subjects,
+                            "stream subjects differ from config, reconciling"
+                        );
+                        self.jetstream
+                            .update_stream(stream_config)
+                            .await
+                            .map_err(|e| NatsError::StreamSetupFailed {
+                                stream: config.name.clone(),
+                                reason: format!("reconcile subjects: {e}"),
+                            })?;
+                        info!(stream = %config.name, "stream subjects reconciled");
+                    } else {
+                        debug!(stream = %config.name, "stream already exists with matching subjects");
+                    }
                     Ok(())
                 }
                 Err(_) => {
