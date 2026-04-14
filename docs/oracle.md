@@ -191,7 +191,8 @@ Client → server (JSON text frames):
 // Drop one or more subscriptions:
 {"action":"unsubscribe","symbols":["ETH/USDT"]}
 
-// Drop the wildcard:
+// Drop everything: clears the wildcard *and* every explicit subscription.
+// After this the client receives nothing until it subscribes again.
 {"action":"unsubscribe","symbols":["all"]}
 ```
 

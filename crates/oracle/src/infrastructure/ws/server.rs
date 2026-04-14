@@ -389,8 +389,15 @@ impl OracleWsServer {
                 for symbol in &msg.symbols {
                     let normalized = normalize_symbol(symbol);
                     if normalized == "all" {
+                        // "all" on unsubscribe clears the wildcard *and* every
+                        // explicit subscription — the intuitive "stop sending
+                        // me anything" operation.
                         *subscribed_all = false;
-                        tracing::debug!(peer = %peer_addr, "unsubscribed from all symbols");
+                        subscribed_symbols.clear();
+                        tracing::debug!(
+                            peer = %peer_addr,
+                            "unsubscribed from all symbols (cleared filter)"
+                        );
                     } else {
                         subscribed_symbols.remove(&normalized);
                         tracing::debug!(
@@ -558,6 +565,26 @@ mod tests {
 
         assert!(!symbols.contains("btc-usdt"));
         assert!(symbols.contains("eth-usdt"));
+    }
+
+    #[test]
+    fn test_handle_client_message_unsubscribe_all_clears_everything() {
+        // "all" on unsubscribe must clear both the wildcard and every
+        // explicit subscription.
+        let mut subscribed_all = true;
+        let mut symbols = HashSet::new();
+        symbols.insert("btc-usdt".to_owned());
+        symbols.insert("eth-usdt".to_owned());
+        let addr: SocketAddr = ([127, 0, 0, 1], 12345).into();
+
+        let msg = r#"{"action":"unsubscribe","symbols":["all"]}"#;
+        OracleWsServer::handle_client_message(msg, &mut subscribed_all, &mut symbols, addr);
+
+        assert!(!subscribed_all);
+        assert!(
+            symbols.is_empty(),
+            "unsubscribe all must also drop explicit subscriptions"
+        );
     }
 
     #[test]
