@@ -1,6 +1,6 @@
 [package]
 name = "market2nats-domain"
-version = "0.171.2"
+version = "0.171.3"
 edition.workspace = true
 description = "Shared domain types for market2nats workspace"
 license = "MIT"
