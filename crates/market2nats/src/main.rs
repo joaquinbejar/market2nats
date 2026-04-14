@@ -44,6 +44,7 @@ async fn main() -> Result<(), ServiceError> {
     );
     info!(
         service = %app_config.service.name,
+        version = env!("CARGO_PKG_VERSION"),
         config = %config_path,
         "starting service"
     );
