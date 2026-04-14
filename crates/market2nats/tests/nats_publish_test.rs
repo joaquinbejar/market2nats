@@ -205,7 +205,7 @@ async fn setup_test_stream(publisher: &JetStreamPublisher, prefix: &str) -> Stri
 #[ignore]
 async fn test_publish_trade_protobuf() {
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client.clone());
+    let publisher = JetStreamPublisher::new(client.clone(), std::time::Duration::from_secs(10));
     let stream_name = setup_test_stream(&publisher, "PUB_TRADE_PB").await;
 
     let envelope = sample_trade_envelope("binance", "BTCUSDT", "BTC/USDT", 1);
@@ -234,7 +234,7 @@ async fn test_publish_trade_protobuf() {
 #[ignore]
 async fn test_publish_trade_json_roundtrip() {
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client.clone());
+    let publisher = JetStreamPublisher::new(client.clone(), std::time::Duration::from_secs(10));
     let stream_name = setup_test_stream(&publisher, "PUB_TRADE_JSON").await;
 
     let envelope = sample_trade_envelope("kraken", "XBTUSD", "BTC/USD", 42);
@@ -262,7 +262,7 @@ async fn test_publish_trade_json_roundtrip() {
 #[ignore]
 async fn test_publish_all_data_types() {
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client.clone());
+    let publisher = JetStreamPublisher::new(client.clone(), std::time::Duration::from_secs(10));
     let stream_name = setup_test_stream(&publisher, "PUB_ALL_TYPES").await;
 
     let envelopes: Vec<MarketDataEnvelope> = vec![
@@ -303,7 +303,7 @@ async fn test_publish_all_data_types() {
 #[ignore]
 async fn test_publish_and_pull_consume() {
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client.clone());
+    let publisher = JetStreamPublisher::new(client.clone(), std::time::Duration::from_secs(10));
     let stream_name = setup_test_stream(&publisher, "PUB_PULL").await;
 
     let count = 10u64;
@@ -352,7 +352,7 @@ async fn test_publish_and_pull_consume() {
 #[ignore]
 async fn test_subject_routing_isolation() {
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client.clone());
+    let publisher = JetStreamPublisher::new(client.clone(), std::time::Duration::from_secs(10));
     let js = jetstream::new(client);
 
     let prefix = unique_subject_prefix();
@@ -444,7 +444,7 @@ async fn test_protobuf_roundtrip_through_nats() {
     use prost::Message;
 
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client.clone());
+    let publisher = JetStreamPublisher::new(client.clone(), std::time::Duration::from_secs(10));
     let stream_name = setup_test_stream(&publisher, "PB_ROUNDTRIP").await;
 
     let envelope = sample_trade_envelope("binance", "ETHUSDT", "ETH/USDT", 99);
@@ -485,7 +485,7 @@ async fn test_protobuf_roundtrip_through_nats() {
 #[ignore]
 async fn test_publish_large_l2_snapshot() {
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client.clone());
+    let publisher = JetStreamPublisher::new(client.clone(), std::time::Duration::from_secs(10));
     let stream_name = setup_test_stream(&publisher, "PUB_LARGE_L2").await;
 
     let envelope = sample_l2_envelope("binance", "BTCUSDT", "BTC/USDT", 1, true);
@@ -517,7 +517,7 @@ async fn test_publish_large_l2_snapshot() {
 #[ignore]
 async fn test_burst_publish_1000_messages() {
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client.clone());
+    let publisher = JetStreamPublisher::new(client.clone(), std::time::Duration::from_secs(10));
     let stream_name = setup_test_stream(&publisher, "PUB_BURST").await;
 
     let ct = serialization::content_type(SerializationFormat::Protobuf);

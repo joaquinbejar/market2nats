@@ -63,7 +63,10 @@ async fn main() -> Result<(), ServiceError> {
 
     // Connect to NATS.
     let nats_client = connect_nats(&app_config.nats).await?;
-    let publisher = Arc::new(JetStreamPublisher::new(nats_client));
+    let publisher = Arc::new(JetStreamPublisher::new(
+        nats_client,
+        std::time::Duration::from_millis(app_config.nats.publish_ack_timeout_ms),
+    ));
     health_monitor.set_nats_connected(true);
 
     // Setup JetStream streams and consumers.

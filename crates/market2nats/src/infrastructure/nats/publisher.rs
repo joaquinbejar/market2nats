@@ -13,14 +13,22 @@ const RETRY_DELAYS_MS: [u64; 3] = [100, 500, 2000];
 /// JetStream publisher implementation.
 pub struct JetStreamPublisher {
     jetstream: jetstream::Context,
+    /// Per-publish ack wait. Each `await` on the ack future is wrapped in a
+    /// `tokio::time::timeout` of this duration so a missing PubAck (broker
+    /// overload, subject not bound to a stream, JetStream not enabled) fails
+    /// fast instead of hanging.
+    ack_timeout: Duration,
 }
 
 impl JetStreamPublisher {
     /// Creates a new `JetStreamPublisher` from an existing NATS connection.
     #[must_use]
-    pub fn new(client: async_nats::Client) -> Self {
+    pub fn new(client: async_nats::Client, ack_timeout: Duration) -> Self {
         let jetstream = jetstream::new(client);
-        Self { jetstream }
+        Self {
+            jetstream,
+            ack_timeout,
+        }
     }
 
     /// Returns a reference to the JetStream context.
@@ -55,21 +63,35 @@ impl NatsPublisher for JetStreamPublisher {
                     .await;
 
                 match publish_result {
-                    Ok(ack_future) => match ack_future.await {
-                        Ok(_ack) => {
-                            debug!(subject = %subject, "published to jetstream");
-                            return Ok(());
+                    Ok(ack_future) => {
+                        match tokio::time::timeout(self.ack_timeout, ack_future).await {
+                            Ok(Ok(_ack)) => {
+                                debug!(subject = %subject, "published to jetstream");
+                                return Ok(());
+                            }
+                            Ok(Err(e)) => {
+                                warn!(
+                                    subject = %subject,
+                                    attempt = attempt + 1,
+                                    error = %e,
+                                    "jetstream ack failed, retrying"
+                                );
+                                last_err = Some(e.to_string());
+                            }
+                            Err(_) => {
+                                warn!(
+                                    subject = %subject,
+                                    attempt = attempt + 1,
+                                    timeout_ms = self.ack_timeout.as_millis() as u64,
+                                    "jetstream ack timeout (no PubAck — check stream binding and broker load), retrying"
+                                );
+                                last_err = Some(format!(
+                                    "ack timeout after {}ms (no PubAck — check stream binding and broker load)",
+                                    self.ack_timeout.as_millis()
+                                ));
+                            }
                         }
-                        Err(e) => {
-                            warn!(
-                                subject = %subject,
-                                attempt = attempt + 1,
-                                error = %e,
-                                "jetstream ack failed, retrying"
-                            );
-                            last_err = Some(e.to_string());
-                        }
-                    },
+                    }
                     Err(e) => {
                         warn!(
                             subject = %subject,

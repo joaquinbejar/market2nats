@@ -179,7 +179,7 @@ fn mock_venue_config(venue_id: &str) -> VenueConfig {
 #[ignore]
 async fn test_end_to_end_mock_to_nats() {
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client.clone());
+    let publisher = JetStreamPublisher::new(client.clone(), std::time::Duration::from_secs(10));
     let js = jetstream::new(client);
 
     // Setup a test stream.
@@ -282,7 +282,7 @@ async fn test_end_to_end_mock_to_nats() {
 #[ignore]
 async fn test_end_to_end_multiple_venues() {
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client.clone());
+    let publisher = JetStreamPublisher::new(client.clone(), std::time::Duration::from_secs(10));
     let js = jetstream::new(client);
 
     let prefix = unique_subject_prefix();
@@ -382,7 +382,7 @@ async fn test_end_to_end_multiple_venues() {
 #[ignore]
 async fn test_end_to_end_sequence_assignment() {
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client.clone());
+    let publisher = JetStreamPublisher::new(client.clone(), std::time::Duration::from_secs(10));
     let js = jetstream::new(client);
 
     let prefix = unique_subject_prefix();

@@ -89,6 +89,9 @@ connect_timeout_ms = 5000
 reconnect_buffer_size = 8388608
 max_reconnects = -1               # -1 = unlimited
 ping_interval_secs = 20
+publish_ack_timeout_ms = 10000    # per-publish JetStream PubAck wait;
+                                  # raise on slow brokers, lower to fail
+                                  # fast when the stream is not bound
 
 [nats.tls]
 enabled = false

@@ -67,7 +67,7 @@ async fn test_jetstream_available() {
 #[ignore]
 async fn test_create_stream() {
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client);
+    let publisher = JetStreamPublisher::new(client, std::time::Duration::from_secs(10));
     let stream_name = unique_stream_name("TEST_STREAM");
 
     let config = StreamConfig {
@@ -105,7 +105,7 @@ async fn test_create_stream() {
 #[ignore]
 async fn test_create_stream_idempotent() {
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client);
+    let publisher = JetStreamPublisher::new(client, std::time::Duration::from_secs(10));
     let stream_name = unique_stream_name("TEST_IDEMPOTENT");
 
     let config = StreamConfig {
@@ -141,7 +141,7 @@ async fn test_create_stream_idempotent() {
 #[ignore]
 async fn test_create_consumer() {
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client);
+    let publisher = JetStreamPublisher::new(client, std::time::Duration::from_secs(10));
     let stream_name = unique_stream_name("TEST_CONSUMER_STREAM");
 
     // Create stream first.
@@ -204,7 +204,7 @@ async fn test_create_consumer() {
 #[ignore]
 async fn test_create_consumer_missing_stream() {
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client);
+    let publisher = JetStreamPublisher::new(client, std::time::Duration::from_secs(10));
 
     let consumer_config = ConsumerConfig {
         stream: "NONEXISTENT_STREAM_12345".to_owned(),
@@ -229,7 +229,7 @@ async fn test_create_consumer_missing_stream() {
 #[ignore]
 async fn test_health_check_ok() {
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client);
+    let publisher = JetStreamPublisher::new(client, std::time::Duration::from_secs(10));
 
     let result = publisher.health_check().await;
     assert!(result.is_ok(), "health check failed: {:?}", result.err());
@@ -240,7 +240,7 @@ async fn test_health_check_ok() {
 #[ignore]
 async fn test_setup_multiple_streams() {
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client);
+    let publisher = JetStreamPublisher::new(client, std::time::Duration::from_secs(10));
     let prefix = unique_subject_prefix();
 
     let stream_configs = vec![
@@ -311,7 +311,7 @@ async fn test_setup_multiple_streams() {
 #[ignore]
 async fn test_stream_retention_policies() {
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client);
+    let publisher = JetStreamPublisher::new(client, std::time::Duration::from_secs(10));
     let js = publisher.jetstream_context();
 
     for (retention, storage) in [
@@ -351,7 +351,7 @@ async fn test_stream_retention_policies() {
 #[ignore]
 async fn test_consumer_ack_policies() {
     let client = connect_nats().await;
-    let publisher = JetStreamPublisher::new(client);
+    let publisher = JetStreamPublisher::new(client, std::time::Duration::from_secs(10));
     let js = publisher.jetstream_context();
     let stream_name = unique_stream_name("TEST_ACK_POLICIES");
 

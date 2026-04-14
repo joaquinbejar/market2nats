@@ -73,6 +73,15 @@ pub struct NatsConfig {
     /// Ping interval in seconds.
     #[serde(default = "default_ping_interval")]
     pub ping_interval_secs: u64,
+    /// Per-publish JetStream ack wait, in milliseconds.
+    ///
+    /// JetStream returns `PubAck` after persisting the message; if the broker
+    /// is overloaded or the subject is not bound to a stream, no ack arrives
+    /// and the publish hangs. This timeout caps each `await` on the ack
+    /// future. Default: 10000 (10s) — matches the tradeoff between fast
+    /// failure detection and tolerance of brief broker stalls.
+    #[serde(default = "default_publish_ack_timeout")]
+    pub publish_ack_timeout_ms: u64,
     /// Authentication method: "none", "token", "userpass", "nkey", "credentials".
     #[serde(default = "default_auth")]
     pub auth: String,
@@ -338,6 +347,11 @@ fn default_max_reconnects() -> i64 {
 #[inline]
 fn default_ping_interval() -> u64 {
     20
+}
+
+#[inline]
+fn default_publish_ack_timeout() -> u64 {
+    10_000
 }
 
 #[inline]
