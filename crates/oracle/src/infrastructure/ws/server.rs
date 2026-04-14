@@ -78,25 +78,22 @@ impl OracleWsServer {
         self.connected_clients.load(Ordering::Relaxed)
     }
 
-    /// Runs the TCP listener, accepting WebSocket connections until shutdown.
+    /// Binds the TCP listener and prepares any TLS acceptor.
     ///
-    /// When `config.tls_enabled` is true, each accepted TCP stream is wrapped
-    /// with a TLS acceptor before the WebSocket handshake (`wss://`).
-    /// Otherwise the connection is served as plain `ws://`.
+    /// Returning a `BoundWsServer` separates port acquisition (which can fail
+    /// fast at startup) from the long-running accept loop in
+    /// [`BoundWsServer::serve`]. `main.rs` should call this synchronously
+    /// before spawning, so a port conflict or bad TLS material aborts
+    /// startup instead of being logged from inside a detached task.
     ///
     /// # Errors
     ///
     /// Returns `OracleError::Nats` if the TCP bind fails or the TLS material
     /// cannot be loaded.
-    #[tracing::instrument(
-        skip(self, config, shutdown),
-        fields(port = config.port, path = %config.path, tls = config.tls_enabled)
-    )]
-    pub async fn run(
+    pub async fn bind(
         self: Arc<Self>,
         config: &WebSocketConfig,
-        mut shutdown: watch::Receiver<bool>,
-    ) -> Result<(), OracleError> {
+    ) -> Result<BoundWsServer, OracleError> {
         let addr: SocketAddr = ([0, 0, 0, 0], config.port).into();
         let listener = TcpListener::bind(addr)
             .await
@@ -119,10 +116,75 @@ impl OracleWsServer {
             addr = %addr,
             path = %config.path,
             tls = config.tls_enabled,
-            "WebSocket server started"
+            "WebSocket server bound"
         );
 
-        let path_owned = config.path.clone();
+        Ok(BoundWsServer {
+            server: self,
+            listener,
+            tls_acceptor,
+            path: config.path.clone(),
+        })
+    }
+
+    /// Convenience: bind and serve in one call.
+    ///
+    /// Equivalent to `bind(config).await?.serve(shutdown).await`. Kept for
+    /// in-process integration tests; production code should call `bind` and
+    /// `serve` separately so bind errors surface in `main`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::bind`].
+    #[tracing::instrument(
+        skip(self, config, shutdown),
+        fields(port = config.port, path = %config.path, tls = config.tls_enabled)
+    )]
+    pub async fn run(
+        self: Arc<Self>,
+        config: &WebSocketConfig,
+        shutdown: watch::Receiver<bool>,
+    ) -> Result<(), OracleError> {
+        self.bind(config).await?.serve(shutdown).await
+    }
+}
+
+/// A WebSocket server that has acquired its TCP listener and (optionally) its
+/// TLS acceptor. Returned by [`OracleWsServer::bind`]; consumed by
+/// [`BoundWsServer::serve`] to run the accept loop.
+pub struct BoundWsServer {
+    server: Arc<OracleWsServer>,
+    listener: TcpListener,
+    tls_acceptor: Option<TlsAcceptor>,
+    path: String,
+}
+
+impl BoundWsServer {
+    /// Returns the local address the listener is bound to (useful for tests
+    /// that pick port `0` and then need to know what port the OS assigned).
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error if the local address cannot be read.
+    pub fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        self.listener.local_addr()
+    }
+
+    /// Runs the accept loop until `shutdown` flips to `true`. Consumes self.
+    pub async fn serve(self, mut shutdown: watch::Receiver<bool>) -> Result<(), OracleError> {
+        let BoundWsServer {
+            server,
+            listener,
+            tls_acceptor,
+            path,
+        } = self;
+
+        tracing::info!(
+            addr = ?listener.local_addr().ok(),
+            path = %path,
+            tls = tls_acceptor.is_some(),
+            "WebSocket server started"
+        );
 
         loop {
             tokio::select! {
@@ -138,9 +200,9 @@ impl OracleWsServer {
                 accept_result = listener.accept() => {
                     match accept_result {
                         Ok((stream, peer_addr)) => {
-                            let server = Arc::clone(&self);
-                            let expected_path = path_owned.clone();
-                            let rx = self.tx.subscribe();
+                            let conn_server = Arc::clone(&server);
+                            let expected_path = path.clone();
+                            let rx = server.tx.subscribe();
                             let shutdown_rx = shutdown.clone();
                             let acceptor = tls_acceptor.clone();
 
@@ -148,7 +210,7 @@ impl OracleWsServer {
                                 let result = match acceptor {
                                     Some(acc) => match acc.accept(stream).await {
                                         Ok(tls_stream) => {
-                                            server
+                                            conn_server
                                                 .handle_connection(
                                                     tls_stream,
                                                     peer_addr,
@@ -163,7 +225,7 @@ impl OracleWsServer {
                                         ))),
                                     },
                                     None => {
-                                        server
+                                        conn_server
                                             .handle_connection(
                                                 stream,
                                                 peer_addr,
@@ -195,7 +257,9 @@ impl OracleWsServer {
         tracing::info!("WebSocket server stopped");
         Ok(())
     }
+}
 
+impl OracleWsServer {
     /// Handles a single WebSocket client connection.
     ///
     /// Generic over the underlying transport so the same code path serves both

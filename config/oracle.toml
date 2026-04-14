@@ -33,8 +33,10 @@ subject_pattern = "oracle.<symbol_normalized>"
 format = "json"
 publish_interval_ms = 1000
 
+# Optional WebSocket fan-out. Disabled by default to avoid opening a port
+# unexpectedly. Flip `enabled` to true to expose the WS server on `port`.
 [websocket]
-enabled = true
+enabled = false
 port = 9092
 path = "/"
 # TLS support (wss://). When enabled, both files must be valid PEM.

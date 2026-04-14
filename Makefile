@@ -298,7 +298,6 @@ killall:
 		echo "  Port 9091: free"; \
 	fi
 	@echo "Done."
-	@echo "Done."
 	@echo "Killing oracle processes (port 9092)..."
 	@pid=$$(lsof -ti :9092 2>/dev/null); \
 	if [ -n "$$pid" ]; then \

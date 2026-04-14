@@ -74,17 +74,14 @@ async fn main() -> Result<(), ServiceError> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Optionally build the WebSocket server and compose with FanOutPublisher.
-    let ws_server: Option<Arc<OracleWsServer>> = if app_config.websocket.enabled {
+    // Bind synchronously so a port-conflict or bad TLS material aborts startup
+    // here instead of being logged from inside a detached task.
+    let (ws_server, ws_handle): (
+        Option<Arc<OracleWsServer>>,
+        Option<tokio::task::JoinHandle<()>>,
+    ) = if app_config.websocket.enabled {
         let server = Arc::new(OracleWsServer::new());
-        let ws_config = app_config.websocket.clone();
-        let server_run = Arc::clone(&server);
-        let ws_shutdown = shutdown_rx.clone();
-
-        tokio::spawn(async move {
-            if let Err(e) = server_run.run(&ws_config, ws_shutdown).await {
-                tracing::error!(error = %e, "WebSocket server failed");
-            }
-        });
+        let bound = Arc::clone(&server).bind(&app_config.websocket).await?;
 
         info!(
             port = app_config.websocket.port,
@@ -92,9 +89,16 @@ async fn main() -> Result<(), ServiceError> {
             tls = app_config.websocket.tls_enabled,
             "WebSocket server enabled"
         );
-        Some(server)
+
+        let ws_shutdown = shutdown_rx.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(e) = bound.serve(ws_shutdown).await {
+                tracing::error!(error = %e, "WebSocket server failed");
+            }
+        });
+        (Some(server), Some(handle))
     } else {
-        None
+        (None, None)
     };
 
     // Build the composite publisher: NATS always, plus WebSocket if enabled.
@@ -189,6 +193,16 @@ async fn main() -> Result<(), ServiceError> {
 
     // Wait for service to drain with timeout.
     let _ = tokio::time::timeout(Duration::from_secs(5), service_handle).await;
+
+    // Drain the WebSocket server with a timeout. Any open client connections
+    // see the shutdown watch and close themselves before the timeout fires.
+    if let Some(handle) = ws_handle
+        && tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .is_err()
+    {
+        tracing::warn!("WebSocket server did not stop within 5s, abandoning task");
+    }
 
     http_handle.abort();
     info!("oracle stopped");

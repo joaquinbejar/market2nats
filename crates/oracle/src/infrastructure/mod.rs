@@ -7,4 +7,4 @@ pub mod ws;
 
 pub use fan_out::FanOutPublisher;
 pub use nats::{NatsTradeSubscriber, OraclePricePublisher, connect_nats};
-pub use ws::OracleWsServer;
+pub use ws::{BoundWsServer, OracleWsServer};
