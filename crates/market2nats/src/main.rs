@@ -42,10 +42,15 @@ async fn main() -> Result<(), ServiceError> {
         &app_config.service.log_level,
         &app_config.service.log_format,
     );
+    let config_file = std::path::Path::new(&config_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| config_path.clone());
     info!(
         service = %app_config.service.name,
         version = env!("CARGO_PKG_VERSION"),
-        config = %config_path,
+        config_file = %config_file,
+        config_path = %config_path,
         "starting service"
     );
 
