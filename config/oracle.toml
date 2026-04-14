@@ -37,3 +37,7 @@ publish_interval_ms = 1000
 enabled = true
 port = 9092
 path = "/"
+# TLS support (wss://). When enabled, both files must be valid PEM.
+# tls_enabled = true
+# tls_cert_file = "/etc/oracle/tls/server.crt"
+# tls_key_file  = "/etc/oracle/tls/server.key"

@@ -33,6 +33,8 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 axum = { workspace = true }
 tokio-tungstenite = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 
 [dev-dependencies]
 rust_decimal_macros = { workspace = true }

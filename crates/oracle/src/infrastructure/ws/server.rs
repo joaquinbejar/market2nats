@@ -5,7 +5,9 @@
 //! prices to all matching clients via a `tokio::sync::broadcast` channel.
 
 use std::collections::HashSet;
+use std::fs::File;
 use std::future::Future;
+use std::io::BufReader;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -14,13 +16,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
+use tokio_rustls::TlsAcceptor;
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use tokio_rustls::rustls::{self, ServerConfig};
 use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
 use crate::application::metrics::{ORACLE_WS_CONNECTED_CLIENTS, ORACLE_WS_MESSAGES_SENT};
 use crate::application::ports::OraclePublisher;
+use crate::config::model::WebSocketConfig;
 use crate::domain::{OracleError, OraclePrice};
 
 /// Broadcast channel capacity for oracle price messages.
@@ -73,28 +80,49 @@ impl OracleWsServer {
 
     /// Runs the TCP listener, accepting WebSocket connections until shutdown.
     ///
-    /// Each accepted connection is spawned as an independent task that manages
-    /// its own subscription filter and message dispatch.
+    /// When `config.tls_enabled` is true, each accepted TCP stream is wrapped
+    /// with a TLS acceptor before the WebSocket handshake (`wss://`).
+    /// Otherwise the connection is served as plain `ws://`.
     ///
     /// # Errors
     ///
-    /// Returns `OracleError::Nats` (reusing the I/O error variant) if binding
-    /// the TCP listener fails.
-    #[tracing::instrument(skip(self, shutdown), fields(port = port, path = %path))]
+    /// Returns `OracleError::Nats` if the TCP bind fails or the TLS material
+    /// cannot be loaded.
+    #[tracing::instrument(
+        skip(self, config, shutdown),
+        fields(port = config.port, path = %config.path, tls = config.tls_enabled)
+    )]
     pub async fn run(
         self: Arc<Self>,
-        port: u16,
-        path: &str,
+        config: &WebSocketConfig,
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), OracleError> {
-        let addr: SocketAddr = ([0, 0, 0, 0], port).into();
+        let addr: SocketAddr = ([0, 0, 0, 0], config.port).into();
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|e| OracleError::nats(format!("ws server bind {addr}: {e}")))?;
 
-        tracing::info!(addr = %addr, path = %path, "WebSocket server started");
+        let tls_acceptor: Option<TlsAcceptor> = if config.tls_enabled {
+            let cert_path = config.tls_cert_file.as_deref().ok_or_else(|| {
+                OracleError::nats("websocket.tls_enabled requires tls_cert_file".to_owned())
+            })?;
+            let key_path = config.tls_key_file.as_deref().ok_or_else(|| {
+                OracleError::nats("websocket.tls_enabled requires tls_key_file".to_owned())
+            })?;
+            let server_config = load_tls_config(cert_path, key_path)?;
+            Some(TlsAcceptor::from(Arc::new(server_config)))
+        } else {
+            None
+        };
 
-        let path_owned = path.to_owned();
+        tracing::info!(
+            addr = %addr,
+            path = %config.path,
+            tls = config.tls_enabled,
+            "WebSocket server started"
+        );
+
+        let path_owned = config.path.clone();
 
         loop {
             tokio::select! {
@@ -114,12 +142,40 @@ impl OracleWsServer {
                             let expected_path = path_owned.clone();
                             let rx = self.tx.subscribe();
                             let shutdown_rx = shutdown.clone();
+                            let acceptor = tls_acceptor.clone();
 
                             tokio::spawn(async move {
-                                if let Err(e) = server
-                                    .handle_connection(stream, peer_addr, &expected_path, rx, shutdown_rx)
-                                    .await
-                                {
+                                let result = match acceptor {
+                                    Some(acc) => match acc.accept(stream).await {
+                                        Ok(tls_stream) => {
+                                            server
+                                                .handle_connection(
+                                                    tls_stream,
+                                                    peer_addr,
+                                                    &expected_path,
+                                                    rx,
+                                                    shutdown_rx,
+                                                )
+                                                .await
+                                        }
+                                        Err(e) => Err(OracleError::nats(format!(
+                                            "tls handshake failed for {peer_addr}: {e}"
+                                        ))),
+                                    },
+                                    None => {
+                                        server
+                                            .handle_connection(
+                                                stream,
+                                                peer_addr,
+                                                &expected_path,
+                                                rx,
+                                                shutdown_rx,
+                                            )
+                                            .await
+                                    }
+                                };
+
+                                if let Err(e) = result {
                                     tracing::debug!(
                                         peer = %peer_addr,
                                         error = %e,
@@ -142,17 +198,23 @@ impl OracleWsServer {
 
     /// Handles a single WebSocket client connection.
     ///
+    /// Generic over the underlying transport so the same code path serves both
+    /// plain TCP (`ws://`) and TLS (`wss://`).
+    ///
     /// Validates the HTTP upgrade path, then enters a loop that:
     /// - Reads client messages (subscribe/unsubscribe) to update the filter
     /// - Forwards matching broadcast messages as WebSocket text frames
-    async fn handle_connection(
+    async fn handle_connection<S>(
         &self,
-        stream: TcpStream,
+        stream: S,
         peer_addr: SocketAddr,
         expected_path: &str,
         mut broadcast_rx: broadcast::Receiver<(String, Bytes)>,
         mut shutdown: watch::Receiver<bool>,
-    ) -> Result<(), OracleError> {
+    ) -> Result<(), OracleError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         // Perform WebSocket handshake with path validation.
         // The error type is dictated by the `tokio-tungstenite` callback API.
         let expected = expected_path.to_owned();
@@ -284,6 +346,10 @@ impl OracleWsServer {
     }
 
     /// Processes a client subscribe/unsubscribe message.
+    ///
+    /// Symbols are normalized to the NATS-subject form (lowercase, `/` → `-`)
+    /// before being inserted into the filter set, so the client can use any
+    /// of `BTC/USDT`, `btc/usdt`, `BTC-USDT`, or `btc-usdt` interchangeably.
     fn handle_client_message(
         text: &str,
         subscribed_all: &mut bool,
@@ -305,14 +371,15 @@ impl OracleWsServer {
         match msg.action.as_str() {
             "subscribe" => {
                 for symbol in &msg.symbols {
-                    if symbol == "all" {
+                    let normalized = normalize_symbol(symbol);
+                    if normalized == "all" {
                         *subscribed_all = true;
                         tracing::debug!(peer = %peer_addr, "subscribed to all symbols");
                     } else {
-                        subscribed_symbols.insert(symbol.clone());
+                        subscribed_symbols.insert(normalized.clone());
                         tracing::debug!(
                             peer = %peer_addr,
-                            symbol = %symbol,
+                            symbol = %normalized,
                             "subscribed to symbol"
                         );
                     }
@@ -320,14 +387,15 @@ impl OracleWsServer {
             }
             "unsubscribe" => {
                 for symbol in &msg.symbols {
-                    if symbol == "all" {
+                    let normalized = normalize_symbol(symbol);
+                    if normalized == "all" {
                         *subscribed_all = false;
                         tracing::debug!(peer = %peer_addr, "unsubscribed from all symbols");
                     } else {
-                        subscribed_symbols.remove(symbol);
+                        subscribed_symbols.remove(&normalized);
                         tracing::debug!(
                             peer = %peer_addr,
-                            symbol = %symbol,
+                            symbol = %normalized,
                             "unsubscribed from symbol"
                         );
                     }
@@ -342,6 +410,47 @@ impl OracleWsServer {
             }
         }
     }
+}
+
+/// Normalizes a client-provided symbol to the NATS subject form used by
+/// `CanonicalSymbol::normalized()`: lowercase with `/` replaced by `-`.
+#[inline]
+fn normalize_symbol(raw: &str) -> String {
+    raw.trim().to_lowercase().replace('/', "-")
+}
+
+/// Loads a `rustls::ServerConfig` from PEM cert and key files on disk.
+///
+/// Accepts certificate chains (multiple PEM blocks). For the key, tries
+/// PKCS#8 first, then RSA, then EC.
+fn load_tls_config(cert_path: &str, key_path: &str) -> Result<ServerConfig, OracleError> {
+    let cert_file = File::open(cert_path)
+        .map_err(|e| OracleError::nats(format!("open tls cert {cert_path}: {e}")))?;
+    let mut cert_reader = BufReader::new(cert_file);
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| OracleError::nats(format!("parse tls cert {cert_path}: {e}")))?;
+    if certs.is_empty() {
+        return Err(OracleError::nats(format!(
+            "no certificates found in {cert_path}"
+        )));
+    }
+
+    let key_file = File::open(key_path)
+        .map_err(|e| OracleError::nats(format!("open tls key {key_path}: {e}")))?;
+    let mut key_reader = BufReader::new(key_file);
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_reader)
+        .map_err(|e| OracleError::nats(format!("parse tls key {key_path}: {e}")))?
+        .ok_or_else(|| OracleError::nats(format!("no private key found in {key_path}")))?;
+
+    // Install default crypto provider (ring) the first time this is reached.
+    // Idempotent: subsequent calls return Err which we ignore.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| OracleError::nats(format!("build tls server config: {e}")))
 }
 
 impl OraclePublisher for OracleWsServer {
@@ -420,6 +529,23 @@ mod tests {
     }
 
     #[test]
+    fn test_handle_client_message_subscribe_canonical_form() {
+        // Clients can send the canonical form `BTC/USDT`; server normalizes
+        // to `btc-usdt` to match broadcast keys produced by
+        // `CanonicalSymbol::normalized()`.
+        let mut subscribed_all = false;
+        let mut symbols = HashSet::new();
+        let addr: SocketAddr = ([127, 0, 0, 1], 12345).into();
+
+        let msg = r#"{"action":"subscribe","symbols":["BTC/USDT","ETH/USDT"]}"#;
+        OracleWsServer::handle_client_message(msg, &mut subscribed_all, &mut symbols, addr);
+
+        assert!(!subscribed_all);
+        assert!(symbols.contains("btc-usdt"));
+        assert!(symbols.contains("eth-usdt"));
+    }
+
+    #[test]
     fn test_handle_client_message_unsubscribe() {
         let mut subscribed_all = false;
         let mut symbols = HashSet::new();
@@ -432,6 +558,30 @@ mod tests {
 
         assert!(!symbols.contains("btc-usdt"));
         assert!(symbols.contains("eth-usdt"));
+    }
+
+    #[test]
+    fn test_handle_client_message_unsubscribe_canonical_form() {
+        let mut subscribed_all = false;
+        let mut symbols = HashSet::new();
+        symbols.insert("btc-usdt".to_owned());
+        symbols.insert("eth-usdt".to_owned());
+        let addr: SocketAddr = ([127, 0, 0, 1], 12345).into();
+
+        let msg = r#"{"action":"unsubscribe","symbols":["BTC/USDT"]}"#;
+        OracleWsServer::handle_client_message(msg, &mut subscribed_all, &mut symbols, addr);
+
+        assert!(!symbols.contains("btc-usdt"));
+        assert!(symbols.contains("eth-usdt"));
+    }
+
+    #[test]
+    fn test_normalize_symbol_forms() {
+        assert_eq!(normalize_symbol("BTC/USDT"), "btc-usdt");
+        assert_eq!(normalize_symbol("btc/usdt"), "btc-usdt");
+        assert_eq!(normalize_symbol("BTC-USDT"), "btc-usdt");
+        assert_eq!(normalize_symbol("  btc-usdt  "), "btc-usdt");
+        assert_eq!(normalize_symbol("ALL"), "all");
     }
 
     #[test]

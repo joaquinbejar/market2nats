@@ -76,20 +76,20 @@ async fn main() -> Result<(), ServiceError> {
     // Optionally build the WebSocket server and compose with FanOutPublisher.
     let ws_server: Option<Arc<OracleWsServer>> = if app_config.websocket.enabled {
         let server = Arc::new(OracleWsServer::new());
-        let ws_port = app_config.websocket.port;
-        let ws_path = app_config.websocket.path.clone();
+        let ws_config = app_config.websocket.clone();
         let server_run = Arc::clone(&server);
         let ws_shutdown = shutdown_rx.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = server_run.run(ws_port, &ws_path, ws_shutdown).await {
+            if let Err(e) = server_run.run(&ws_config, ws_shutdown).await {
                 tracing::error!(error = %e, "WebSocket server failed");
             }
         });
 
         info!(
-            port = ws_port,
+            port = app_config.websocket.port,
             path = %app_config.websocket.path,
+            tls = app_config.websocket.tls_enabled,
             "WebSocket server enabled"
         );
         Some(server)

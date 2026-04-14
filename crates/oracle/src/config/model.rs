@@ -124,6 +124,16 @@ pub struct WebSocketConfig {
     /// URL path for WebSocket upgrade requests.
     #[serde(default = "default_ws_path")]
     pub path: String,
+    /// Whether to serve over TLS (`wss://`). When `true`, both `tls_cert_file`
+    /// and `tls_key_file` must be set.
+    #[serde(default)]
+    pub tls_enabled: bool,
+    /// Path to the TLS certificate (PEM, may include the chain).
+    #[serde(default)]
+    pub tls_cert_file: Option<String>,
+    /// Path to the TLS private key (PEM, PKCS#8 or RSA).
+    #[serde(default)]
+    pub tls_key_file: Option<String>,
 }
 
 impl Default for WebSocketConfig {
@@ -133,6 +143,9 @@ impl Default for WebSocketConfig {
             enabled: false,
             port: default_ws_port(),
             path: default_ws_path(),
+            tls_enabled: false,
+            tls_cert_file: None,
+            tls_key_file: None,
         }
     }
 }

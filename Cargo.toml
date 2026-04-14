@@ -10,6 +10,9 @@ edition = "2024"
 tokio = { version = "1", features = ["full"] }
 # WebSocket
 tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
+# TLS server (rustls + PEM loader for the oracle WebSocket server)
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
 # NATS
 async-nats = "0.47"
 # Serialization
