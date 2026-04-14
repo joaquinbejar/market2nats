@@ -232,10 +232,45 @@ and exposes `normalized()` for subject rendering.
 
 ## HTTP endpoints
 
+The relay's HTTP server binds on the port reported in the startup log
+(`http health server started`). With the default config this is `8080`.
+
 | Endpoint | Description |
 |---|---|
 | `GET /health` | JSON with per-venue `ConnectionState`, NATS connection state, and overall health (`healthy` / `degraded` / `unhealthy`). Returns `200` when overall is `healthy`, else `503`. |
 | `GET /metrics` | Prometheus exposition. |
+
+Quick checks with `curl`:
+
+```bash
+# Pretty-printed health (requires jq)
+curl -s http://localhost:8080/health | jq
+
+# Just the overall status
+curl -s http://localhost:8080/health | jq -r '.status'
+
+# Per-venue connection state
+curl -s http://localhost:8080/health | jq '.venues'
+
+# Health that fails the script when not 200 (use in a probe)
+curl -fsS http://localhost:8080/health > /dev/null && echo OK
+
+# Full Prometheus metrics dump
+curl -s http://localhost:8080/metrics
+
+# Filter to just the relay-specific metrics
+curl -s http://localhost:8080/metrics | grep -E '^market2nats_'
+
+# Per-venue/data_type pipeline counters
+curl -s http://localhost:8080/metrics | grep '^market2nats_pipeline_received_total'
+curl -s http://localhost:8080/metrics | grep '^market2nats_pipeline_published_total'
+
+# Venue connection-state gauge (0 disc, 1 conn, 2 reconn, 3 circuit_open)
+curl -s http://localhost:8080/metrics | grep '^market2nats_venue_connection_state'
+
+# Is the NATS client connected? (1 = yes, 0 = no)
+curl -s http://localhost:8080/metrics | grep '^market2nats_nats_connected'
+```
 
 ## Metrics reference
 

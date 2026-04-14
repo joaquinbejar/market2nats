@@ -253,6 +253,34 @@ websocat -k wss://localhost:9093
 | `GET /health` | JSON status. Returns `200` when overall health is `healthy`, else `503`. Includes per-symbol staleness and (when enabled) the WebSocket connected-client count. |
 | `GET /metrics` | Prometheus exposition. |
 
+Quick checks with `curl`:
+
+```bash
+# Pretty-printed health (requires jq)
+curl -s http://localhost:9091/health | jq
+
+# Just the overall status
+curl -s http://localhost:9091/health | jq -r '.status'
+
+# Connected WebSocket clients
+curl -s http://localhost:9091/health | jq '.websocket'
+
+# Health that fails the script when not 200 (use in a probe)
+curl -fsS http://localhost:9091/health > /dev/null && echo OK
+
+# Full Prometheus metrics dump
+curl -s http://localhost:9091/metrics
+
+# Filter to just the oracle-specific gauges and counters
+curl -s http://localhost:9091/metrics | grep -E '^oracle_'
+
+# Trade-message counters per venue and instrument
+curl -s http://localhost:9091/metrics | grep '^oracle_trade_messages_received_total'
+
+# WebSocket fan-out counters
+curl -s http://localhost:9091/metrics | grep -E '^oracle_ws_'
+```
+
 `/health` shape:
 
 ```json

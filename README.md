@@ -172,7 +172,20 @@ Both services expose health and metrics on HTTP:
 | `oracle` | `9091` (default) | `GET /health`, `GET /metrics` |
 | `oracle` (WebSocket) | `9092` (default) | `ws://` or `wss://` for live oracle prices |
 
-Detailed metric tables are in the per-service docs.
+Quick checks:
+
+```bash
+# Relay
+curl -s http://localhost:8080/health  | jq
+curl -s http://localhost:8080/metrics | grep '^market2nats_'
+
+# Oracle
+curl -s http://localhost:9091/health  | jq
+curl -s http://localhost:9091/metrics | grep '^oracle_'
+```
+
+Detailed metric tables and more `curl` examples (per-venue counters,
+WebSocket gauges, scriptable probes) are in the per-service docs.
 
 ## Key dependencies
 
