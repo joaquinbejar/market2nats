@@ -1,110 +1,200 @@
-# Market Data Relay
+# market2nats
 
-Rust service that connects to public WebSocket feeds from multiple trading venues, normalizes market data (trades, ticker, L2 orderbook, funding rates, liquidations), and publishes it to NATS JetStream.
+A Rust workspace with two services for normalized cryptocurrency market data:
 
-## Architecture
+- **[`market2nats`](./docs/market2nats.md)** — connects to public WebSocket
+  feeds from a configurable set of trading venues, normalizes every event
+  (trade, ticker, L2 orderbook, funding rate, liquidation) to a single
+  envelope, and republishes it to NATS JetStream.
+- **[`oracle`](./docs/oracle.md)** — subscribes to the trade subjects produced
+  by `market2nats`, runs a configurable aggregation pipeline (median, TWAP,
+  VWAP, median-filtered) per canonical symbol, and publishes the resulting
+  oracle price to NATS **and** (optionally) to live WebSocket clients.
 
-```
-WebSocket Feeds ──► Venue Adapters ──► mpsc channels ──► Publisher ──► NATS JetStream
-     (per venue)       (normalize)      (backpressure)    (serialize)    (persist)
-```
+Both services are stateless, single-binary, and configured via a single TOML
+file each.
 
-**Layered DDD design:**
-
-| Layer | Path | Responsibility |
-|---|---|---|
-| Domain | `crates/market2nats/src/domain/` | Pure types, enums, value objects. No I/O, no async. |
-| Config | `crates/market2nats/src/config/` | TOML parsing, validation, env var substitution. |
-| Application | `crates/market2nats/src/application/` | Orchestration: subscription manager, stream router, sequence tracker, health monitor. |
-| Infrastructure | `crates/market2nats/src/infrastructure/` | WebSocket adapters, NATS publisher, HTTP health/metrics server. |
-| Serialization | `crates/market2nats/src/serialization/` | Protobuf (prost) and JSON encoding for market data events. |
-
-## NATS Subject Pattern
+## Repository layout
 
 ```
-market.<venue_id>.<canonical_symbol_normalized>.<data_type>
+crates/
+  market2nats-domain/        Shared domain newtypes (Price, Quantity, …)
+  market2nats/               Relay service (WebSocket → NATS JetStream)
+  oracle/                    Aggregator service (NATS trades → oracle price)
+config/                      Reference TOML configs
+docs/
+  market2nats.md             Relay service — architecture, config, metrics
+  oracle.md                  Oracle service — pipeline, WebSocket protocol, TLS
+  wire-format.md             NATS wire contract (single source of truth)
+Docker/
+  docker-compose.yml         NATS + both services with public images
+  Dockerfile                 Multi-stage build for the relay
+  oracle.Dockerfile          Multi-stage build for the oracle
+.github/workflows/           Multi-arch (amd64, arm64) CI builds
+rules/global_rules.md        Binding coding rules (DDD, no f64, checked math, …)
 ```
 
-Examples:
-- `market.binance.btc-usdt.trade`
-- `market.kraken.eth-usd.l2_orderbook`
-- `market.binance.eth-usdt.liquidation`
+## Quickstart
 
-## Market Data Types
-
-- **Trade** — executed trades with price, quantity, side
-- **Ticker** — best bid/ask and last price
-- **L2 Orderbook** — depth snapshots and incremental deltas
-- **Funding Rate** — perpetual futures funding rates
-- **Liquidation** — forced liquidation events
-
-## Configuration
-
-All configuration is declarative via a single TOML file (`config/relay.toml`):
-
-- Service settings (logging, shutdown timeout)
-- NATS connection (URLs, auth, TLS)
-- JetStream streams and consumers (storage, retention, ack policies)
-- Venue definitions (WebSocket URLs, reconnect, circuit breaker)
-- Subscriptions per venue (instruments, data types)
+### 1. Bring up NATS
 
 ```bash
-# Run with default config
-cargo run
-
-# Run with custom config
-cargo run -- path/to/config.toml
+docker compose -f Docker/docker-compose.yml up -d nats
 ```
+
+NATS is exposed on `localhost:4222` (auth `nats / AS09.1qa` per the compose
+file) and management on `localhost:8222`.
+
+### 2. Run the relay
+
+```bash
+NATS_URL='nats://nats:AS09.1qa@localhost:4222' \
+  cargo run --release -p market2nats -- config/relay.all-spot-trades.toml
+```
+
+This subscribes to BTC/USDT and ETH/USDT trades on every supported spot
+venue (Binance, Bitstamp, Bybit, Coinbase, Crypto.com, Gate.io, Kraken,
+OKX) and publishes them to `market.<venue>.<symbol>.trade`.
+
+### 3. Run the oracle
+
+```bash
+NATS_URL='nats://nats:AS09.1qa@localhost:4222' \
+  cargo run --release -p oracle -- config/oracle.toml
+```
+
+The oracle aggregates the trade stream and publishes one price per symbol
+per second on `oracle.<symbol_normalized>` (e.g. `oracle.btc-usdt`). With
+the default config it also opens a WebSocket server on `:9092`.
+
+### 4. Subscribe over WebSocket
+
+```bash
+# Plain ws://
+websocat ws://localhost:9092
+> {"action":"subscribe","symbols":["BTC/USDT"]}
+
+# Or get every symbol the oracle knows
+> {"action":"subscribe","symbols":["all"]}
+
+# Drop a subscription
+> {"action":"unsubscribe","symbols":["ETH/USDT"]}
+```
+
+For `wss://` setup with a self-signed cert and full WebSocket protocol
+details see [`docs/oracle.md`](./docs/oracle.md#tls-wss).
+
+### 5. With Docker (public images)
+
+```bash
+docker compose -f Docker/docker-compose.yml up -d
+```
+
+This pulls `ghcr.io/joaquinbejar/market2nats:latest` and
+`ghcr.io/joaquinbejar/oracle:latest` (multi-arch, amd64 + arm64) and starts
+NATS, the relay (using `relay.all-spot-trades.toml`), and the oracle.
+
+## Architecture in one picture
+
+```
+            ┌────────────────────────────────────────────────────────────────┐
+            │                       market2nats relay                       │
+WebSocket ──►   GenericWsAdapter ──► mpsc ──► Pipeline ──► NatsPublisher    │
+(per venue) │       (parse,         (back-     (sequence,    (3 retries)    │
+            │       normalize)      pressure)  fan-out)                     │
+            └─────────────────┬──────────────────────────────────────────────┘
+                              │
+                              ▼
+                  market.<venue>.<symbol>.<type>
+                              │
+                              ▼
+            ┌────────────────────────────────────────────────────────────────┐
+            │                          oracle                               │
+            │  NatsTradeSubscriber ──► OracleService (1s tick)              │
+            │      (filter,            (staleness, outlier, strategy)       │
+            │      bookkeep)                       │                        │
+            │                                       ▼                        │
+            │                         FanOutPublisher                        │
+            │                          ├─► OraclePricePublisher (NATS)      │
+            │                          └─► OracleWsServer (ws:// / wss://)  │
+            └─────────────────┬──────────────────────────────────────────────┘
+                              │                                       │
+                              ▼                                       ▼
+                 oracle.<symbol_normalized>           ws://host:9092 (clients)
+```
+
+The full data envelope is locked by [`docs/wire-format.md`](./docs/wire-format.md).
+Every adapter must produce events that match it; consumers depend on it.
+
+## Coding rules
+
+Binding rules live in [`rules/global_rules.md`](./rules/global_rules.md). The
+short version:
+
+- **DDD** — `domain → application → infrastructure`. Domain has zero async,
+  zero I/O, zero infra imports.
+- `rust_decimal::Decimal` for every monetary value — never `f64`.
+- **Checked arithmetic only** — `checked_add` / `checked_sub` / `checked_mul`
+  / `checked_div`. No `saturating_*`, no `wrapping_*`, no raw operators on
+  decimals.
+- `thiserror` enums per layer. No `anyhow`.
+- `tracing` only for logs. Never `println!`, `eprintln!`, `dbg!`, `log`.
+- Newtypes at every boundary (`VenueId`, `InstrumentId`, `CanonicalSymbol`,
+  `Price`, `Quantity`, `Sequence`, `Timestamp`).
+- **Zero `.unwrap()` / `.expect()`** in production code. Pattern match or
+  `.ok_or_else()`.
+
+## Build & test
+
+```bash
+# Whole workspace
+cargo build --release
+cargo test --all-features
+
+# One crate at a time
+cargo build --release -p market2nats
+cargo build --release -p oracle
+
+# Pre-push (clippy + fmt + tests + docs)
+make pre-push
+```
+
+The pre-push lane runs the same checks CI does — clippy with `-D warnings`,
+`cargo fmt --check`, `cargo test --all-features`, and `cargo build --release`.
 
 ## Endpoints
 
-| Endpoint | Description |
-|---|---|
-| `GET /health` | JSON health status (per-venue state, NATS status, overall health) |
-| `GET /metrics` | Prometheus metrics |
+Both services expose health and metrics on HTTP:
 
-## Resilience
+| Service | Port | Endpoints |
+|---|---|---|
+| `market2nats` | `8080` (default) | `GET /health`, `GET /metrics` |
+| `oracle` | `9091` (default) | `GET /health`, `GET /metrics` |
+| `oracle` (WebSocket) | `9092` (default) | `ws://` or `wss://` for live oracle prices |
 
-- **Exponential backoff** reconnection per venue with configurable delays
-- **Circuit breaker** (Closed → Open → HalfOpen) per venue to avoid hammering down endpoints
-- **Bounded channels** between layers for backpressure propagation
-- **Publish retries** with 3 attempts (100ms → 500ms → 2s) before dropping
-- **Graceful shutdown** with configurable drain timeout on SIGTERM/SIGINT
+Detailed metric tables are in the per-service docs.
 
-## Build
+## Key dependencies
 
-```bash
-# Build
-cargo build --release
-
-# Test
-cargo test --all-features
-
-# Lint
-cargo clippy --all-targets --all-features -- -D warnings
-
-# Format
-cargo +stable fmt --all
-```
-
-## Key Dependencies
-
-| Crate | Purpose |
-|---|---|
-| `tokio` | Async runtime |
-| `tokio-tungstenite` | WebSocket client |
-| `async-nats` | NATS client with JetStream |
-| `prost` | Protobuf serialization |
-| `rust_decimal` | Decimal arithmetic (no f64 for prices) |
-| `tracing` | Structured logging |
-| `axum` | HTTP server for health/metrics |
-| `dashmap` | Concurrent hash maps |
-| `thiserror` | Typed error enums |
-
+| Crate | Used by | Purpose |
+|---|---|---|
+| `tokio` | both | Async runtime |
+| `tokio-tungstenite` | both | WebSocket (client in relay, server in oracle) |
+| `tokio-rustls` + `rustls-pemfile` | oracle | TLS termination for the WebSocket server |
+| `async-nats` | both | NATS client (JetStream in the relay) |
+| `prost` | relay | Protobuf serialization |
+| `serde_json` | both | JSON serialization |
+| `rust_decimal` | both | Decimal arithmetic (no f64 for prices) |
+| `tracing` | both | Structured logging |
+| `axum` | both | HTTP server for `/health` and `/metrics` |
+| `dashmap` | both | Concurrent hash maps |
+| `metrics` + `metrics-exporter-prometheus` | both | Prometheus instrumentation |
+| `thiserror` | both | Typed error enums |
 
 ## Contact
 
-If you have any questions, issues, or would like to provide feedback, please feel free to contact the project maintainer:
+If you have questions, issues, or would like to provide feedback, please
+contact the project maintainer:
 
 - **Author**: Joaquín Béjar García
 - **Email**: jb@taunais.com
@@ -116,4 +206,5 @@ If you have any questions, issues, or would like to provide feedback, please fee
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE)
+file for details.
