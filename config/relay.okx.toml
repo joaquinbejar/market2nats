@@ -43,6 +43,7 @@ connect_timeout_ms = 5000
 reconnect_buffer_size = 8388608
 max_reconnects = -1
 ping_interval_secs = 20
+publish_ack_timeout_ms = 10000
 auth = "userpass"
 username = "${NATS_USER}"
 password = "${NATS_PASSWORD}"

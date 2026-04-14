@@ -269,6 +269,7 @@ mod tests {
                 reconnect_buffer_size: 8_388_608,
                 max_reconnects: -1,
                 ping_interval_secs: 20,
+                publish_ack_timeout_ms: 10_000,
                 auth: "none".to_owned(),
                 token: None,
                 username: None,
