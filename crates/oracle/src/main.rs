@@ -50,7 +50,11 @@ async fn main() -> Result<(), ServiceError> {
         &app_config.service.log_level,
         &app_config.service.log_format,
     );
-    info!(config_path = %config_path, "oracle starting");
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        config_path = %config_path,
+        "oracle starting"
+    );
 
     // Install Prometheus metrics recorder.
     let prom_handle = metrics_exporter_prometheus::PrometheusBuilder::new()

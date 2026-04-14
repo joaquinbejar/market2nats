@@ -1,6 +1,6 @@
 [package]
 name = "oracle"
-version = "0.171.4"
+version = "0.171.5"
 edition.workspace = true
 description = "Aggregated oracle price computation from multi-venue trade data"
 license = "MIT"
