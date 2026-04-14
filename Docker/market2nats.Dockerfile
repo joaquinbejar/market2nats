@@ -19,4 +19,4 @@ COPY config/* /etc/market2nats/
 EXPOSE 8080
 
 ENTRYPOINT ["market2nats"]
-CMD ["/etc/market2nats/relay.toml"]
+CMD ["/etc/market2nats/relay.all-spot-trades.toml"]

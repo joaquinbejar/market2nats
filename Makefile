@@ -289,6 +289,24 @@ killall:
 		echo "  Port 8080: free"; \
 	fi
 	@echo "Done."
+	@echo "Killing oracle processes (port 9091)..."
+	@pid=$$(lsof -ti :9091 2>/dev/null); \
+	if [ -n "$$pid" ]; then \
+		echo "  Port 9091: killing PID $$pid"; \
+		kill -9 $$pid 2>/dev/null || true; \
+	else \
+		echo "  Port 9091: free"; \
+	fi
+	@echo "Done."
+	@echo "Killing oracle processes (port 9092)..."
+	@pid=$$(lsof -ti :9092 2>/dev/null); \
+	if [ -n "$$pid" ]; then \
+		echo "  Port 9092: killing PID $$pid"; \
+		kill -9 $$pid 2>/dev/null || true; \
+	else \
+		echo "  Port 9092: free"; \
+	fi
+	@echo "Done."
 
 .PHONY: workflow-coverage
 workflow-coverage:

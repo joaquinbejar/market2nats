@@ -19,6 +19,9 @@ pub struct OracleConfig {
     pub pipeline: PipelineConfig,
     /// Output publishing configuration.
     pub publish: PublishConfig,
+    /// Optional WebSocket server configuration for real-time price fan-out.
+    #[serde(default)]
+    pub websocket: WebSocketConfig,
 }
 
 /// Service-level settings (name, logging).
@@ -108,6 +111,45 @@ pub struct PipelineConfig {
     pub twap_window_ms: u64,
 }
 
+/// WebSocket server configuration for fan-out of oracle prices.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSocketConfig {
+    /// Whether the WebSocket server is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// TCP port for the WebSocket server.
+    #[serde(default = "default_ws_port")]
+    pub port: u16,
+    /// URL path for WebSocket upgrade requests.
+    #[serde(default = "default_ws_path")]
+    pub path: String,
+    /// Whether to serve over TLS (`wss://`). When `true`, both `tls_cert_file`
+    /// and `tls_key_file` must be set.
+    #[serde(default)]
+    pub tls_enabled: bool,
+    /// Path to the TLS certificate (PEM, may include the chain).
+    #[serde(default)]
+    pub tls_cert_file: Option<String>,
+    /// Path to the TLS private key (PEM, PKCS#8 or RSA).
+    #[serde(default)]
+    pub tls_key_file: Option<String>,
+}
+
+impl Default for WebSocketConfig {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_ws_port(),
+            path: default_ws_path(),
+            tls_enabled: false,
+            tls_cert_file: None,
+            tls_key_file: None,
+        }
+    }
+}
+
 /// Publishing configuration for oracle output.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -184,6 +226,18 @@ fn default_publish_interval_ms() -> u64 {
     1_000
 }
 
+/// Default WebSocket port: 9092.
+#[inline]
+fn default_ws_port() -> u16 {
+    9092
+}
+
+/// Default WebSocket path: "/".
+#[inline]
+fn default_ws_path() -> String {
+    "/".to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +272,88 @@ subject_pattern = "oracle.<symbol_normalized>.price"
         assert_eq!(config.publish.format, "json");
         assert_eq!(config.publish.publish_interval_ms, 1_000);
         assert_eq!(config.service.http_port, 9091);
+    }
+
+    #[test]
+    fn test_websocket_config_defaults() {
+        let toml_str = r#"
+[service]
+name = "oracle"
+
+[nats]
+urls = ["nats://localhost:4222"]
+
+[[subscriptions]]
+symbol = "BTC/USDT"
+subjects = ["market.binance.btc-usdt.trade"]
+
+[pipeline]
+strategy = "median"
+
+[publish]
+subject_pattern = "oracle.<symbol_normalized>.price"
+"#;
+        let config: OracleConfig = toml::from_str(toml_str).expect("valid TOML");
+        assert!(!config.websocket.enabled);
+        assert_eq!(config.websocket.port, 9092);
+        assert_eq!(config.websocket.path, "/");
+    }
+
+    #[test]
+    fn test_websocket_config_explicit() {
+        let toml_str = r#"
+[service]
+name = "oracle"
+
+[nats]
+urls = ["nats://localhost:4222"]
+
+[[subscriptions]]
+symbol = "BTC/USDT"
+subjects = ["market.binance.btc-usdt.trade"]
+
+[pipeline]
+strategy = "median"
+
+[publish]
+subject_pattern = "oracle.<symbol_normalized>.price"
+
+[websocket]
+enabled = true
+port = 8888
+path = "/ws"
+"#;
+        let config: OracleConfig = toml::from_str(toml_str).expect("valid TOML");
+        assert!(config.websocket.enabled);
+        assert_eq!(config.websocket.port, 8888);
+        assert_eq!(config.websocket.path, "/ws");
+    }
+
+    #[test]
+    fn test_websocket_config_deny_unknown_fields() {
+        let toml_str = r#"
+[service]
+name = "oracle"
+
+[nats]
+urls = ["nats://localhost:4222"]
+
+[[subscriptions]]
+symbol = "BTC/USDT"
+subjects = ["market.binance.btc-usdt.trade"]
+
+[pipeline]
+strategy = "median"
+
+[publish]
+subject_pattern = "oracle.<symbol_normalized>.price"
+
+[websocket]
+enabled = true
+unknown_field = true
+"#;
+        let result: Result<OracleConfig, _> = toml::from_str(toml_str);
+        assert!(result.is_err());
     }
 
     #[test]

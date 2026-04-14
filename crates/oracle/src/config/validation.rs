@@ -31,6 +31,26 @@ pub enum ConfigValidationError {
         /// The symbol whose subscription has no subjects.
         symbol: String,
     },
+
+    /// The WebSocket port must be greater than 0 when enabled.
+    #[error("websocket.port must be > 0")]
+    InvalidWsPort,
+
+    /// The WebSocket path must start with '/'.
+    #[error("websocket.path must start with '/'")]
+    InvalidWsPath,
+
+    /// `tls_enabled = true` requires both `tls_cert_file` and `tls_key_file`.
+    #[error("websocket.tls_enabled requires both tls_cert_file and tls_key_file")]
+    MissingTlsFiles,
+
+    /// The configured TLS certificate file does not exist.
+    #[error("websocket.tls_cert_file does not exist: {0}")]
+    TlsCertFileMissing(String),
+
+    /// The configured TLS key file does not exist.
+    #[error("websocket.tls_key_file does not exist: {0}")]
+    TlsKeyFileMissing(String),
 }
 
 /// Validates the oracle configuration, returning all detected errors.
@@ -77,6 +97,32 @@ pub fn validate_config(config: &OracleConfig) -> Vec<ConfigValidationError> {
         errors.push(ConfigValidationError::MissingPlaceholder);
     }
 
+    // Validate WebSocket configuration when enabled.
+    if config.websocket.enabled {
+        if config.websocket.port == 0 {
+            errors.push(ConfigValidationError::InvalidWsPort);
+        }
+        if !config.websocket.path.starts_with('/') {
+            errors.push(ConfigValidationError::InvalidWsPath);
+        }
+        if config.websocket.tls_enabled {
+            match (
+                config.websocket.tls_cert_file.as_deref(),
+                config.websocket.tls_key_file.as_deref(),
+            ) {
+                (Some(cert), Some(key)) => {
+                    if !std::path::Path::new(cert).exists() {
+                        errors.push(ConfigValidationError::TlsCertFileMissing(cert.to_owned()));
+                    }
+                    if !std::path::Path::new(key).exists() {
+                        errors.push(ConfigValidationError::TlsKeyFileMissing(key.to_owned()));
+                    }
+                }
+                _ => errors.push(ConfigValidationError::MissingTlsFiles),
+            }
+        }
+    }
+
     errors
 }
 
@@ -85,6 +131,7 @@ mod tests {
     use super::*;
     use crate::config::model::{
         NatsConfig, OracleConfig, PipelineConfig, PublishConfig, ServiceConfig, SubscriptionEntry,
+        WebSocketConfig,
     };
 
     /// Builds a valid baseline config for mutation in individual tests.
@@ -125,6 +172,7 @@ mod tests {
                 format: "json".to_owned(),
                 publish_interval_ms: 1_000,
             },
+            websocket: WebSocketConfig::default(),
         }
     }
 
@@ -193,5 +241,109 @@ mod tests {
         assert!(errors.iter().any(
             |e| matches!(e, ConfigValidationError::EmptySubjects { symbol } if symbol == "ETH/USDT")
         ));
+    }
+
+    #[test]
+    fn test_validate_ws_port_zero_rejected_when_enabled() {
+        let mut config = valid_config();
+        config.websocket.enabled = true;
+        config.websocket.port = 0;
+        config.websocket.path = "/".to_owned();
+        let errors = validate_config(&config);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigValidationError::InvalidWsPort))
+        );
+    }
+
+    #[test]
+    fn test_validate_ws_path_no_leading_slash_rejected_when_enabled() {
+        let mut config = valid_config();
+        config.websocket.enabled = true;
+        config.websocket.port = 9092;
+        config.websocket.path = "ws".to_owned();
+        let errors = validate_config(&config);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigValidationError::InvalidWsPath))
+        );
+    }
+
+    #[test]
+    fn test_validate_ws_disabled_skips_validation() {
+        let mut config = valid_config();
+        config.websocket.enabled = false;
+        config.websocket.port = 0;
+        config.websocket.path = "no-slash".to_owned();
+        let errors = validate_config(&config);
+        // No websocket errors when disabled.
+        assert!(!errors.iter().any(|e| matches!(
+            e,
+            ConfigValidationError::InvalidWsPort | ConfigValidationError::InvalidWsPath
+        )));
+    }
+
+    #[test]
+    fn test_validate_ws_valid_when_enabled() {
+        let mut config = valid_config();
+        config.websocket.enabled = true;
+        config.websocket.port = 9092;
+        config.websocket.path = "/ws".to_owned();
+        let errors = validate_config(&config);
+        assert!(!errors.iter().any(|e| matches!(
+            e,
+            ConfigValidationError::InvalidWsPort | ConfigValidationError::InvalidWsPath
+        )));
+    }
+
+    #[test]
+    fn test_validate_ws_tls_enabled_without_cert_and_key_rejected() {
+        let mut config = valid_config();
+        config.websocket.enabled = true;
+        config.websocket.tls_enabled = true;
+        // tls_cert_file / tls_key_file left as None.
+        let errors = validate_config(&config);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigValidationError::MissingTlsFiles))
+        );
+    }
+
+    #[test]
+    fn test_validate_ws_tls_enabled_with_missing_cert_file_rejected() {
+        let mut config = valid_config();
+        config.websocket.enabled = true;
+        config.websocket.tls_enabled = true;
+        config.websocket.tls_cert_file = Some("/nonexistent/cert.pem".to_owned());
+        config.websocket.tls_key_file = Some("/nonexistent/key.pem".to_owned());
+        let errors = validate_config(&config);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigValidationError::TlsCertFileMissing(_)))
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigValidationError::TlsKeyFileMissing(_)))
+        );
+    }
+
+    #[test]
+    fn test_validate_ws_tls_disabled_skips_tls_checks() {
+        let mut config = valid_config();
+        config.websocket.enabled = true;
+        config.websocket.tls_enabled = false;
+        // tls_cert_file / tls_key_file are None.
+        let errors = validate_config(&config);
+        assert!(!errors.iter().any(|e| matches!(
+            e,
+            ConfigValidationError::MissingTlsFiles
+                | ConfigValidationError::TlsCertFileMissing(_)
+                | ConfigValidationError::TlsKeyFileMissing(_)
+        )));
     }
 }
