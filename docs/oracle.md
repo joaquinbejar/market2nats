@@ -188,13 +188,29 @@ Client → server (JSON text frames):
 // Subscribe to every symbol the oracle knows about:
 {"action":"subscribe","symbols":["all"]}
 
-// Drop one or more subscriptions:
+// Drop one or more subscriptions. Works whether you previously did an
+// explicit `subscribe` for these symbols or only `subscribe all` — in
+// the latter case the symbol is added to an exclusion set so the
+// wildcard skips it.
 {"action":"unsubscribe","symbols":["ETH/USDT"]}
 
-// Drop everything: clears the wildcard *and* every explicit subscription.
-// After this the client receives nothing until it subscribes again.
+// Drop everything: clears the wildcard, every explicit subscription,
+// and any prior exclusions. After this the client receives nothing
+// until it subscribes again.
 {"action":"unsubscribe","symbols":["all"]}
 ```
+
+The filter is the union of three pieces of state:
+
+- An **allowlist** populated by `subscribe X` — always sent.
+- A **wildcard flag** populated by `subscribe all` — sends everything not in the
+  exclusion set.
+- An **exclusion set** populated by `unsubscribe X` while the wildcard is on —
+  carves holes in the wildcard.
+
+So `subscribe all` followed by `unsubscribe ETH/USDT` does what you'd expect:
+every symbol streams except ETH/USDT. Re-issuing `subscribe ETH/USDT` clears
+the exclusion and ETH/USDT comes back.
 
 Server → client: every matching tick is forwarded as a text frame containing
 the same JSON envelope published to NATS. There is no acknowledgement frame

@@ -248,9 +248,14 @@ impl OracleWsServer {
 
         let (mut ws_sink, mut ws_source) = ws_stream.split();
 
-        // Subscription filter state.
+        // Subscription filter state. The matching rule is:
+        //   send if subscribed_symbols.contains(symbol)
+        //     OR  (subscribed_all && !excluded_symbols.contains(symbol))
+        // So an explicit subscribe always wins, and `unsubscribe X` carves a
+        // hole in the wildcard so users can do `subscribe all` + `unsubscribe ETH/USDT`.
         let mut subscribed_all = false;
         let mut subscribed_symbols: HashSet<String> = HashSet::new();
+        let mut excluded_symbols: HashSet<String> = HashSet::new();
 
         let result: Result<(), OracleError> = async {
             loop {
@@ -271,6 +276,7 @@ impl OracleWsServer {
                                     &text,
                                     &mut subscribed_all,
                                     &mut subscribed_symbols,
+                                    &mut excluded_symbols,
                                     peer_addr,
                                 );
                             }
@@ -298,7 +304,10 @@ impl OracleWsServer {
                     broadcast_msg = broadcast_rx.recv() => {
                         match broadcast_msg {
                             Ok((symbol_normalized, payload)) => {
-                                if subscribed_all || subscribed_symbols.contains(&symbol_normalized) {
+                                let matches = subscribed_symbols.contains(&symbol_normalized)
+                                    || (subscribed_all
+                                        && !excluded_symbols.contains(&symbol_normalized));
+                                if matches {
                                     let text = String::from_utf8_lossy(&payload).into_owned();
                                     if let Err(e) = ws_sink.send(Message::Text(text.into())).await {
                                         tracing::debug!(
@@ -350,10 +359,18 @@ impl OracleWsServer {
     /// Symbols are normalized to the NATS-subject form (lowercase, `/` → `-`)
     /// before being inserted into the filter set, so the client can use any
     /// of `BTC/USDT`, `btc/usdt`, `BTC-USDT`, or `btc-usdt` interchangeably.
+    ///
+    /// The filter has three pieces of state:
+    /// - `subscribed_symbols`: explicit allowlist; an entry here is always sent.
+    /// - `subscribed_all`: wildcard flag; when true, anything not in
+    ///   `excluded_symbols` is sent.
+    /// - `excluded_symbols`: denylist that carves holes in the wildcard, so
+    ///   `subscribe all` + `unsubscribe ETH/USDT` does what users expect.
     fn handle_client_message(
         text: &str,
         subscribed_all: &mut bool,
         subscribed_symbols: &mut HashSet<String>,
+        excluded_symbols: &mut HashSet<String>,
         peer_addr: SocketAddr,
     ) {
         let msg: ClientMessage = match serde_json::from_str(text) {
@@ -374,8 +391,12 @@ impl OracleWsServer {
                     let normalized = normalize_symbol(symbol);
                     if normalized == "all" {
                         *subscribed_all = true;
+                        // Re-subscribing to "all" cancels any prior exclusions.
+                        excluded_symbols.clear();
                         tracing::debug!(peer = %peer_addr, "subscribed to all symbols");
                     } else {
+                        // Explicit subscribe trumps an exclusion for the same symbol.
+                        excluded_symbols.remove(&normalized);
                         subscribed_symbols.insert(normalized.clone());
                         tracing::debug!(
                             peer = %peer_addr,
@@ -390,16 +411,20 @@ impl OracleWsServer {
                     let normalized = normalize_symbol(symbol);
                     if normalized == "all" {
                         // "all" on unsubscribe clears the wildcard *and* every
-                        // explicit subscription — the intuitive "stop sending
-                        // me anything" operation.
+                        // explicit subscription / exclusion — the intuitive
+                        // "stop sending me anything" operation.
                         *subscribed_all = false;
                         subscribed_symbols.clear();
+                        excluded_symbols.clear();
                         tracing::debug!(
                             peer = %peer_addr,
                             "unsubscribed from all symbols (cleared filter)"
                         );
                     } else {
+                        // Drop any explicit subscription, and add to the
+                        // exclusion set so the wildcard skips this symbol too.
                         subscribed_symbols.remove(&normalized);
+                        excluded_symbols.insert(normalized.clone());
                         tracing::debug!(
                             peer = %peer_addr,
                             symbol = %normalized,
@@ -494,6 +519,11 @@ impl OraclePublisher for OracleWsServer {
 mod tests {
     use super::*;
 
+    /// Helper for the three filter sets used by `handle_client_message`.
+    fn empty_filter() -> (bool, HashSet<String>, HashSet<String>) {
+        (false, HashSet::new(), HashSet::new())
+    }
+
     #[test]
     fn test_ws_server_connected_clients_starts_at_zero() {
         let server = OracleWsServer::new();
@@ -511,24 +541,34 @@ mod tests {
 
     #[test]
     fn test_handle_client_message_subscribe_all() {
-        let mut subscribed_all = false;
-        let mut symbols = HashSet::new();
+        let (mut subscribed_all, mut symbols, mut excluded) = empty_filter();
         let addr: SocketAddr = ([127, 0, 0, 1], 12345).into();
 
         let msg = r#"{"action":"subscribe","symbols":["all"]}"#;
-        OracleWsServer::handle_client_message(msg, &mut subscribed_all, &mut symbols, addr);
+        OracleWsServer::handle_client_message(
+            msg,
+            &mut subscribed_all,
+            &mut symbols,
+            &mut excluded,
+            addr,
+        );
 
         assert!(subscribed_all);
     }
 
     #[test]
     fn test_handle_client_message_subscribe_specific() {
-        let mut subscribed_all = false;
-        let mut symbols = HashSet::new();
+        let (mut subscribed_all, mut symbols, mut excluded) = empty_filter();
         let addr: SocketAddr = ([127, 0, 0, 1], 12345).into();
 
         let msg = r#"{"action":"subscribe","symbols":["btc-usdt","eth-usdt"]}"#;
-        OracleWsServer::handle_client_message(msg, &mut subscribed_all, &mut symbols, addr);
+        OracleWsServer::handle_client_message(
+            msg,
+            &mut subscribed_all,
+            &mut symbols,
+            &mut excluded,
+            addr,
+        );
 
         assert!(!subscribed_all);
         assert!(symbols.contains("btc-usdt"));
@@ -537,15 +577,17 @@ mod tests {
 
     #[test]
     fn test_handle_client_message_subscribe_canonical_form() {
-        // Clients can send the canonical form `BTC/USDT`; server normalizes
-        // to `btc-usdt` to match broadcast keys produced by
-        // `CanonicalSymbol::normalized()`.
-        let mut subscribed_all = false;
-        let mut symbols = HashSet::new();
+        let (mut subscribed_all, mut symbols, mut excluded) = empty_filter();
         let addr: SocketAddr = ([127, 0, 0, 1], 12345).into();
 
         let msg = r#"{"action":"subscribe","symbols":["BTC/USDT","ETH/USDT"]}"#;
-        OracleWsServer::handle_client_message(msg, &mut subscribed_all, &mut symbols, addr);
+        OracleWsServer::handle_client_message(
+            msg,
+            &mut subscribed_all,
+            &mut symbols,
+            &mut excluded,
+            addr,
+        );
 
         assert!(!subscribed_all);
         assert!(symbols.contains("btc-usdt"));
@@ -558,33 +600,47 @@ mod tests {
         let mut symbols = HashSet::new();
         symbols.insert("btc-usdt".to_owned());
         symbols.insert("eth-usdt".to_owned());
+        let mut excluded = HashSet::new();
         let addr: SocketAddr = ([127, 0, 0, 1], 12345).into();
 
         let msg = r#"{"action":"unsubscribe","symbols":["btc-usdt"]}"#;
-        OracleWsServer::handle_client_message(msg, &mut subscribed_all, &mut symbols, addr);
+        OracleWsServer::handle_client_message(
+            msg,
+            &mut subscribed_all,
+            &mut symbols,
+            &mut excluded,
+            addr,
+        );
 
         assert!(!symbols.contains("btc-usdt"));
         assert!(symbols.contains("eth-usdt"));
+        assert!(excluded.contains("btc-usdt"));
     }
 
     #[test]
     fn test_handle_client_message_unsubscribe_all_clears_everything() {
-        // "all" on unsubscribe must clear both the wildcard and every
-        // explicit subscription.
+        // "all" on unsubscribe must clear the wildcard, every explicit
+        // subscription, and any prior exclusions.
         let mut subscribed_all = true;
         let mut symbols = HashSet::new();
         symbols.insert("btc-usdt".to_owned());
         symbols.insert("eth-usdt".to_owned());
+        let mut excluded = HashSet::new();
+        excluded.insert("xrp-usdt".to_owned());
         let addr: SocketAddr = ([127, 0, 0, 1], 12345).into();
 
         let msg = r#"{"action":"unsubscribe","symbols":["all"]}"#;
-        OracleWsServer::handle_client_message(msg, &mut subscribed_all, &mut symbols, addr);
+        OracleWsServer::handle_client_message(
+            msg,
+            &mut subscribed_all,
+            &mut symbols,
+            &mut excluded,
+            addr,
+        );
 
         assert!(!subscribed_all);
-        assert!(
-            symbols.is_empty(),
-            "unsubscribe all must also drop explicit subscriptions"
-        );
+        assert!(symbols.is_empty(), "unsubscribe all must drop explicit");
+        assert!(excluded.is_empty(), "unsubscribe all must drop exclusions");
     }
 
     #[test]
@@ -593,13 +649,69 @@ mod tests {
         let mut symbols = HashSet::new();
         symbols.insert("btc-usdt".to_owned());
         symbols.insert("eth-usdt".to_owned());
+        let mut excluded = HashSet::new();
         let addr: SocketAddr = ([127, 0, 0, 1], 12345).into();
 
         let msg = r#"{"action":"unsubscribe","symbols":["BTC/USDT"]}"#;
-        OracleWsServer::handle_client_message(msg, &mut subscribed_all, &mut symbols, addr);
+        OracleWsServer::handle_client_message(
+            msg,
+            &mut subscribed_all,
+            &mut symbols,
+            &mut excluded,
+            addr,
+        );
 
         assert!(!symbols.contains("btc-usdt"));
         assert!(symbols.contains("eth-usdt"));
+        assert!(excluded.contains("btc-usdt"));
+    }
+
+    #[test]
+    fn test_handle_client_message_unsubscribe_with_wildcard_excludes_symbol() {
+        // Regression: after `subscribe all` + `unsubscribe ETH/USDT`, the
+        // wildcard is still on but ETH must be excluded.
+        let mut subscribed_all = true;
+        let mut symbols = HashSet::new();
+        let mut excluded = HashSet::new();
+        let addr: SocketAddr = ([127, 0, 0, 1], 12345).into();
+
+        let msg = r#"{"action":"unsubscribe","symbols":["ETH/USDT"]}"#;
+        OracleWsServer::handle_client_message(
+            msg,
+            &mut subscribed_all,
+            &mut symbols,
+            &mut excluded,
+            addr,
+        );
+
+        assert!(subscribed_all);
+        assert!(excluded.contains("eth-usdt"));
+        assert!(!excluded.contains("btc-usdt"));
+    }
+
+    #[test]
+    fn test_handle_client_message_subscribe_clears_prior_exclusion() {
+        // unsubscribe ETH then subscribe ETH should re-enable ETH.
+        let mut subscribed_all = true;
+        let mut symbols = HashSet::new();
+        let mut excluded = HashSet::new();
+        excluded.insert("eth-usdt".to_owned());
+        let addr: SocketAddr = ([127, 0, 0, 1], 12345).into();
+
+        let msg = r#"{"action":"subscribe","symbols":["ETH/USDT"]}"#;
+        OracleWsServer::handle_client_message(
+            msg,
+            &mut subscribed_all,
+            &mut symbols,
+            &mut excluded,
+            addr,
+        );
+
+        assert!(symbols.contains("eth-usdt"));
+        assert!(
+            !excluded.contains("eth-usdt"),
+            "explicit subscribe must clear the prior exclusion"
+        );
     }
 
     #[test]
@@ -613,27 +725,39 @@ mod tests {
 
     #[test]
     fn test_handle_client_message_invalid_json() {
-        let mut subscribed_all = false;
-        let mut symbols = HashSet::new();
+        let (mut subscribed_all, mut symbols, mut excluded) = empty_filter();
         let addr: SocketAddr = ([127, 0, 0, 1], 12345).into();
 
         // Should not panic, just log and return.
-        OracleWsServer::handle_client_message("not json", &mut subscribed_all, &mut symbols, addr);
+        OracleWsServer::handle_client_message(
+            "not json",
+            &mut subscribed_all,
+            &mut symbols,
+            &mut excluded,
+            addr,
+        );
 
         assert!(!subscribed_all);
         assert!(symbols.is_empty());
+        assert!(excluded.is_empty());
     }
 
     #[test]
     fn test_handle_client_message_unknown_action() {
-        let mut subscribed_all = false;
-        let mut symbols = HashSet::new();
+        let (mut subscribed_all, mut symbols, mut excluded) = empty_filter();
         let addr: SocketAddr = ([127, 0, 0, 1], 12345).into();
 
         let msg = r#"{"action":"reset","symbols":["btc-usdt"]}"#;
-        OracleWsServer::handle_client_message(msg, &mut subscribed_all, &mut symbols, addr);
+        OracleWsServer::handle_client_message(
+            msg,
+            &mut subscribed_all,
+            &mut symbols,
+            &mut excluded,
+            addr,
+        );
 
         assert!(!subscribed_all);
         assert!(symbols.is_empty());
+        assert!(excluded.is_empty());
     }
 }
