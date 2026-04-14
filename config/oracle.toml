@@ -34,6 +34,6 @@ format = "json"
 publish_interval_ms = 1000
 
 [websocket]
-enabled = false
+enabled = true
 port = 9092
 path = "/"
