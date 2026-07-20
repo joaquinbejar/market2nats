@@ -85,6 +85,11 @@ http_port  = 9091             # /health and /metrics
 urls = ["${NATS_URL:-nats://localhost:4222}"]
 # Auth: "none" (default), "token", or "userpass". Credentials embedded in the
 # URL (nats://user:pass@host) take priority over explicit fields.
+# Optional TLS — see the NATS TLS section below.
+# tls_required  = false
+# tls_ca_file   = "/etc/oracle/tls/ca.pem"
+# tls_cert_file = "/etc/oracle/tls/client.crt"
+# tls_key_file  = "/etc/oracle/tls/client.key"
 
 [[subscriptions]]
 symbol   = "BTC/USDT"
@@ -138,6 +143,36 @@ Common pattern:
 [nats]
 urls = ["${NATS_URL:-nats://localhost:4222}"]
 ```
+
+## NATS TLS
+
+Four optional keys on the `[nats]` table control the TLS client:
+
+| Key | Effect |
+| --- | --- |
+| `tls_required` | Forces TLS on the connection (`require_tls`). TLS is also negotiated automatically for `tls://` URLs, so this may stay unset. |
+| `tls_ca_file` | PEM file with the certificate authority that signed the broker certificate. Required for private CAs — without it the handshake fails with `invalid peer certificate: UnknownIssuer`. When unset, the system root store is used. |
+| `tls_cert_file` | Client certificate for mTLS. Must be set together with `tls_key_file`. |
+| `tls_key_file` | Client private key for mTLS. Must be set together with `tls_cert_file`. |
+
+> **`tls_ca_file` replaces the platform root store, it does not extend it.**
+> async-nats loads the system certificates only when no CA file is configured,
+> so a client with `tls_ca_file` set will fail `UnknownIssuer` against any
+> publicly-signed broker in the same `urls` list. Concatenate the public roots
+> into the same PEM bundle when that applies — every certificate in the file is
+> loaded as a trust anchor.
+
+The three file paths are applied whenever they are present, independently of
+`tls_required`, so a `tls://` URL picks up a private CA correctly. Startup
+validation fails if any configured path is not a readable file, or if only one
+of `tls_cert_file` / `tls_key_file` is set — the certificates must therefore be
+mounted before the process starts.
+
+Note the naming divergence from market2nats: the oracle keeps these keys flat
+on `[nats]` (`tls_ca_file`, `tls_cert_file`, `tls_key_file`), while market2nats
+nests them under `[nats.tls]` (`ca_path`, `cert_path`, `key_path`). The
+behaviour is identical; only the key names differ, and they are kept as-is to
+avoid breaking deployed configuration.
 
 ## Subscription wildcards
 

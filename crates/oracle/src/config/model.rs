@@ -43,8 +43,10 @@ pub struct ServiceConfig {
 
 /// NATS connection configuration.
 ///
-/// Fields align with the market2nats `NatsConfig` conventions so that a single
-/// `[nats]` block can be shared across services.
+/// Connection and auth fields follow the same conventions as the market2nats
+/// `NatsConfig`, but the two schemas are **not** interchangeable: TLS material
+/// lives in flat `tls_*` fields here and in a `[nats.tls]` subtable there, and
+/// both structs use `deny_unknown_fields`, so each rejects the other's form.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NatsConfig {

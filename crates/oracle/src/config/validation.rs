@@ -51,6 +51,19 @@ pub enum ConfigValidationError {
     /// The configured TLS key file does not exist.
     #[error("websocket.tls_key_file does not exist: {0}")]
     TlsKeyFileMissing(String),
+
+    /// A configured `[nats]` TLS path is not a readable file on disk.
+    #[error("nats.{field} is not a readable file: {path}")]
+    NatsTlsFileMissing {
+        /// The config key that points at the missing file.
+        field: &'static str,
+        /// The configured path that could not be found.
+        path: String,
+    },
+
+    /// Client TLS requires both `tls_cert_file` and `tls_key_file`.
+    #[error("nats.tls_cert_file and nats.tls_key_file must both be set for client TLS")]
+    NatsTlsClientPairIncomplete,
 }
 
 /// Validates the oracle configuration, returning all detected errors.
@@ -97,6 +110,9 @@ pub fn validate_config(config: &OracleConfig) -> Vec<ConfigValidationError> {
         errors.push(ConfigValidationError::MissingPlaceholder);
     }
 
+    // Validate NATS TLS certificate material.
+    validate_nats_tls(&config.nats, &mut errors);
+
     // Validate WebSocket configuration when enabled.
     if config.websocket.enabled {
         if config.websocket.port == 0 {
@@ -111,10 +127,10 @@ pub fn validate_config(config: &OracleConfig) -> Vec<ConfigValidationError> {
                 config.websocket.tls_key_file.as_deref(),
             ) {
                 (Some(cert), Some(key)) => {
-                    if !std::path::Path::new(cert).exists() {
+                    if !std::path::Path::new(cert).is_file() {
                         errors.push(ConfigValidationError::TlsCertFileMissing(cert.to_owned()));
                     }
-                    if !std::path::Path::new(key).exists() {
+                    if !std::path::Path::new(key).is_file() {
                         errors.push(ConfigValidationError::TlsKeyFileMissing(key.to_owned()));
                     }
                 }
@@ -124,6 +140,41 @@ pub fn validate_config(config: &OracleConfig) -> Vec<ConfigValidationError> {
     }
 
     errors
+}
+
+/// Validates the `[nats]` TLS certificate material.
+///
+/// Every configured path must be a readable file, and client TLS requires both
+/// `tls_cert_file` and `tls_key_file`. Paths are checked regardless of
+/// `tls_required`, because TLS also activates from a `tls://` URL scheme.
+///
+/// This check touches the filesystem: a config that validates on one host can
+/// fail on another where the certificates are not mounted.
+fn validate_nats_tls(
+    nats: &crate::config::model::NatsConfig,
+    errors: &mut Vec<ConfigValidationError>,
+) {
+    for (field, path) in [
+        ("tls_ca_file", nats.tls_ca_file.as_deref()),
+        ("tls_cert_file", nats.tls_cert_file.as_deref()),
+        ("tls_key_file", nats.tls_key_file.as_deref()),
+    ] {
+        // `is_file`, not `exists`: a directory or an unreadable path would
+        // otherwise pass here and fail later inside the TLS handshake with an
+        // opaque I/O error, which is what this check exists to prevent.
+        if let Some(path) = path
+            && !std::path::Path::new(path).is_file()
+        {
+            errors.push(ConfigValidationError::NatsTlsFileMissing {
+                field,
+                path: path.to_owned(),
+            });
+        }
+    }
+
+    if nats.tls_cert_file.is_some() != nats.tls_key_file.is_some() {
+        errors.push(ConfigValidationError::NatsTlsClientPairIncomplete);
+    }
 }
 
 #[cfg(test)]
@@ -330,6 +381,126 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, ConfigValidationError::TlsKeyFileMissing(_)))
         );
+    }
+
+    #[test]
+    fn test_validate_nats_tls_missing_ca_file_rejected() {
+        let mut config = valid_config();
+        config.nats.tls_required = Some(true);
+        config.nats.tls_ca_file = Some("/nonexistent/ca.pem".to_owned());
+        let errors = validate_config(&config);
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ConfigValidationError::NatsTlsFileMissing { field, .. } if *field == "tls_ca_file"
+        )));
+    }
+
+    #[test]
+    fn test_validate_nats_tls_cert_without_key_rejected() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let cert = dir.path().join("client.pem");
+        std::fs::write(&cert, b"cert").expect("write cert");
+
+        let mut config = valid_config();
+        config.nats.tls_cert_file = Some(cert.to_string_lossy().into_owned());
+        let errors = validate_config(&config);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigValidationError::NatsTlsClientPairIncomplete))
+        );
+    }
+
+    #[test]
+    fn test_validate_nats_tls_missing_cert_file_rejected() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let key = dir.path().join("client.key");
+        std::fs::write(&key, b"key").expect("write key");
+
+        let mut config = valid_config();
+        config.nats.tls_cert_file = Some("/nonexistent/client.pem".to_owned());
+        config.nats.tls_key_file = Some(key.to_string_lossy().into_owned());
+        let errors = validate_config(&config);
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ConfigValidationError::NatsTlsFileMissing { field, .. } if *field == "tls_cert_file"
+        )));
+    }
+
+    #[test]
+    fn test_validate_nats_tls_missing_key_file_rejected() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let cert = dir.path().join("client.pem");
+        std::fs::write(&cert, b"cert").expect("write cert");
+
+        let mut config = valid_config();
+        config.nats.tls_cert_file = Some(cert.to_string_lossy().into_owned());
+        config.nats.tls_key_file = Some("/nonexistent/client.key".to_owned());
+        let errors = validate_config(&config);
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ConfigValidationError::NatsTlsFileMissing { field, .. } if *field == "tls_key_file"
+        )));
+    }
+
+    #[test]
+    fn test_validate_nats_tls_key_without_cert_rejected() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let key = dir.path().join("client.key");
+        std::fs::write(&key, b"key").expect("write key");
+
+        let mut config = valid_config();
+        config.nats.tls_key_file = Some(key.to_string_lossy().into_owned());
+        let errors = validate_config(&config);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigValidationError::NatsTlsClientPairIncomplete))
+        );
+    }
+
+    #[test]
+    fn test_validate_nats_tls_directory_instead_of_file_rejected() {
+        // `exists()` would accept a directory here; the check must not.
+        let dir = tempfile::tempdir().expect("create tempdir");
+
+        let mut config = valid_config();
+        config.nats.tls_ca_file = Some(dir.path().to_string_lossy().into_owned());
+        let errors = validate_config(&config);
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ConfigValidationError::NatsTlsFileMissing { field, .. } if *field == "tls_ca_file"
+        )));
+    }
+
+    #[test]
+    fn test_validate_nats_tls_all_paths_present_ok() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let ca = dir.path().join("ca.pem");
+        let cert = dir.path().join("client.pem");
+        let key = dir.path().join("client.key");
+        for path in [&ca, &cert, &key] {
+            std::fs::write(path, b"pem").expect("write pem");
+        }
+
+        let mut config = valid_config();
+        config.nats.tls_required = Some(true);
+        config.nats.tls_ca_file = Some(ca.to_string_lossy().into_owned());
+        config.nats.tls_cert_file = Some(cert.to_string_lossy().into_owned());
+        config.nats.tls_key_file = Some(key.to_string_lossy().into_owned());
+        let errors = validate_config(&config);
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+    }
+
+    #[test]
+    fn test_validate_nats_tls_unset_paths_skipped() {
+        let config = valid_config();
+        let errors = validate_config(&config);
+        assert!(!errors.iter().any(|e| matches!(
+            e,
+            ConfigValidationError::NatsTlsFileMissing { .. }
+                | ConfigValidationError::NatsTlsClientPairIncomplete
+        )));
     }
 
     #[test]

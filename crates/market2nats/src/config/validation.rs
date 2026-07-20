@@ -72,6 +72,8 @@ fn validate_nats(nats: &super::model::NatsConfig, errors: &mut Vec<ConfigValidat
         }
     }
 
+    validate_nats_tls(&nats.tls, errors);
+
     for (i, stream) in nats.streams.iter().enumerate() {
         if stream.name.trim().is_empty() {
             errors.push(ConfigValidationError::Rule(format!(
@@ -126,6 +128,40 @@ fn validate_nats(nats: &super::model::NatsConfig, errors: &mut Vec<ConfigValidat
                 "nats.consumers[{i}].start_time is required when deliver_policy = \"by_start_time\""
             )));
         }
+    }
+}
+
+/// Validates the `[nats.tls]` certificate material.
+///
+/// Every configured path must be a readable file, and client certificates
+/// require both `cert_path` and `key_path` (mTLS needs the pair). Paths are
+/// checked regardless of `enabled`, because TLS also activates from a `tls://`
+/// URL.
+///
+/// This check touches the filesystem: a config that validates on one host can
+/// fail on another where the certificates are not mounted.
+fn validate_nats_tls(tls: &super::model::NatsTlsConfig, errors: &mut Vec<ConfigValidationError>) {
+    for (field, path) in [
+        ("ca_path", tls.ca_path.as_deref()),
+        ("cert_path", tls.cert_path.as_deref()),
+        ("key_path", tls.key_path.as_deref()),
+    ] {
+        // `is_file`, not `exists`: a directory or an unreadable path would
+        // otherwise pass here and fail later inside the TLS handshake with an
+        // opaque I/O error, which is what this check exists to prevent.
+        if let Some(path) = path
+            && !std::path::Path::new(path).is_file()
+        {
+            errors.push(ConfigValidationError::Rule(format!(
+                "nats.tls.{field} is not a readable file: \"{path}\""
+            )));
+        }
+    }
+
+    if tls.cert_path.is_some() != tls.key_path.is_some() {
+        errors.push(ConfigValidationError::Rule(
+            "nats.tls.cert_path and nats.tls.key_path must both be set for client TLS".to_owned(),
+        ));
     }
 }
 
@@ -404,6 +440,129 @@ mod tests {
                 .iter()
                 .any(|e| e.to_string().contains("serialization.format"))
         );
+    }
+
+    #[test]
+    fn test_nats_tls_missing_ca_file_rejected() {
+        let mut config = minimal_valid_config();
+        config.nats.tls.enabled = true;
+        config.nats.tls.ca_path = Some("/nonexistent/ca.pem".to_owned());
+        let errors = validate_config(&config);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.to_string().contains("nats.tls.ca_path"))
+        );
+    }
+
+    #[test]
+    fn test_nats_tls_missing_cert_file_rejected() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let key = dir.path().join("client.key");
+        std::fs::write(&key, b"pem").expect("write pem");
+
+        let mut config = minimal_valid_config();
+        config.nats.tls.cert_path = Some("/nonexistent/client.pem".to_owned());
+        config.nats.tls.key_path = Some(key.to_string_lossy().into_owned());
+        let errors = validate_config(&config);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.to_string().contains("nats.tls.cert_path")),
+            "expected cert_path error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_nats_tls_missing_key_file_rejected() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let cert = dir.path().join("client.pem");
+        std::fs::write(&cert, b"pem").expect("write pem");
+
+        let mut config = minimal_valid_config();
+        config.nats.tls.cert_path = Some(cert.to_string_lossy().into_owned());
+        config.nats.tls.key_path = Some("/nonexistent/client.key".to_owned());
+        let errors = validate_config(&config);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.to_string().contains("nats.tls.key_path")),
+            "expected key_path error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_nats_tls_key_without_cert_rejected() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let key = dir.path().join("client.key");
+        std::fs::write(&key, b"pem").expect("write pem");
+
+        let mut config = minimal_valid_config();
+        config.nats.tls.key_path = Some(key.to_string_lossy().into_owned());
+        let errors = validate_config(&config);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.to_string().contains("must both be set for client TLS"))
+        );
+    }
+
+    #[test]
+    fn test_nats_tls_directory_instead_of_file_rejected() {
+        // `exists()` would accept a directory here; the check must not.
+        let dir = tempfile::tempdir().expect("create tempdir");
+
+        let mut config = minimal_valid_config();
+        config.nats.tls.ca_path = Some(dir.path().to_string_lossy().into_owned());
+        let errors = validate_config(&config);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.to_string().contains("is not a readable file")),
+            "expected not-a-file error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_nats_tls_cert_without_key_rejected() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let cert = dir.path().join("client.pem");
+        std::fs::write(&cert, b"pem").expect("write pem");
+
+        let mut config = minimal_valid_config();
+        config.nats.tls.cert_path = Some(cert.to_string_lossy().into_owned());
+        let errors = validate_config(&config);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.to_string().contains("must both be set for client TLS"))
+        );
+    }
+
+    #[test]
+    fn test_nats_tls_all_paths_present_ok() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let ca = dir.path().join("ca.pem");
+        let cert = dir.path().join("client.pem");
+        let key = dir.path().join("client.key");
+        for path in [&ca, &cert, &key] {
+            std::fs::write(path, b"pem").expect("write pem");
+        }
+
+        let mut config = minimal_valid_config();
+        config.nats.tls.enabled = true;
+        config.nats.tls.ca_path = Some(ca.to_string_lossy().into_owned());
+        config.nats.tls.cert_path = Some(cert.to_string_lossy().into_owned());
+        config.nats.tls.key_path = Some(key.to_string_lossy().into_owned());
+        let errors = validate_config(&config);
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+    }
+
+    #[test]
+    fn test_nats_tls_unset_paths_skipped() {
+        let config = minimal_valid_config();
+        let errors = validate_config(&config);
+        assert!(!errors.iter().any(|e| e.to_string().contains("nats.tls")));
     }
 
     #[test]
