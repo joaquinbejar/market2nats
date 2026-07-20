@@ -95,10 +95,17 @@ publish_ack_timeout_ms = 10000    # per-publish JetStream PubAck wait;
 
 [nats.tls]
 enabled = false
-# When true, also set:
-# ca_file   = "/path/to/ca.pem"
-# cert_file = "/path/to/client.crt"
-# key_file  = "/path/to/client.key"
+# The three fields below are accepted by the parser but NOT yet applied to the
+# NATS connection — only `enabled` has effect today, and it verifies the broker
+# against the system root store. Custom CA and client certificates are not
+# wired up yet. Field names must match exactly (`deny_unknown_fields` is on).
+# ca_path   = "/path/to/ca.pem"
+# cert_path = "/path/to/client.crt"
+# key_path  = "/path/to/client.key"
+# TLS handshakes use rustls with the `ring` crypto provider, installed as the
+# process-level default in `main` (`infrastructure::install_crypto_provider`).
+# rustls cannot select it automatically because both `ring` and `aws-lc-rs`
+# reach the build through transitive dependencies.
 
 [[nats.streams]]
 name        = "MARKET_TRADES"
