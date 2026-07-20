@@ -95,10 +95,31 @@ publish_ack_timeout_ms = 10000    # per-publish JetStream PubAck wait;
 
 [nats.tls]
 enabled = false
-# The three fields below are accepted by the parser but NOT yet applied to the
-# NATS connection — only `enabled` has effect today, and it verifies the broker
-# against the system root store. Custom CA and client certificates are not
-# wired up yet. Field names must match exactly (`deny_unknown_fields` is on).
+# enabled = true forces TLS on the connection (`require_tls`). TLS is also
+# negotiated automatically when a URL uses the `tls://` scheme, in which case
+# `enabled` may stay false.
+#
+# ca_path: PEM file with the certificate authority that signed the broker
+#   certificate. Required when the broker uses a private CA — without it the
+#   handshake fails with `invalid peer certificate: UnknownIssuer`. When unset,
+#   the system root store is used.
+#
+#   WARNING: setting ca_path REPLACES the platform root store, it does not
+#   extend it. async-nats loads the system certificates only when no CA file is
+#   configured. If this client also connects to a publicly-signed broker (a
+#   mixed `urls` list, or NGS failover), that connection will start failing with
+#   UnknownIssuer. Concatenate the public roots into the same PEM bundle — every
+#   certificate in the file is loaded as a trust anchor.
+#
+# cert_path / key_path: client certificate and private key for mTLS. Both must
+#   be set together or neither.
+#
+# All three paths are applied whenever they are present, independently of
+# `enabled`, so `tls://` URLs pick up a private CA correctly. Startup
+# validation fails if any configured path is not a readable file, or if only one
+# of cert_path / key_path is set — so the certificates must be mounted before
+# the process starts. Field names must match exactly (`deny_unknown_fields` is
+# on).
 # ca_path   = "/path/to/ca.pem"
 # cert_path = "/path/to/client.crt"
 # key_path  = "/path/to/client.key"

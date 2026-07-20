@@ -14,6 +14,13 @@ publish_ack_timeout_ms = 10000
 
 [nats.tls]
 enabled = false
+# Private-CA broker: point ca_path at the PEM bundle. It REPLACES the system
+# root store, so include public roots in the bundle if this client also talks
+# to a publicly-signed broker. cert_path/key_path enable mTLS and must be set
+# together. All paths must be readable files at startup or the process aborts.
+# ca_path   = "/etc/market2nats/tls/ca.pem"
+# cert_path = "/etc/market2nats/tls/client.crt"
+# key_path  = "/etc/market2nats/tls/client.key"
 
 # ── Streams ──────────────────────────────────
 

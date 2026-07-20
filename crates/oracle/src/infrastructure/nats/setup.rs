@@ -1,8 +1,9 @@
 //! NATS connection setup with authentication and TLS support.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
-use tracing::info;
+use tracing::{info, instrument, warn};
 
 use crate::config::model::NatsConfig;
 use crate::domain::OracleError;
@@ -46,9 +47,19 @@ fn extract_url_credentials(url: &str) -> (String, Option<(String, String)>) {
 /// - The URL scheme is `tls://`, or
 /// - `tls_required` is set to `true` in config.
 ///
+/// TLS certificate material is applied whenever configured, independently of
+/// `tls_required`: `tls_ca_file` sets the private CA to trust, and the
+/// `tls_cert_file` + `tls_key_file` pair enables mTLS.
+///
+/// Setting `tls_ca_file` **replaces** the platform root store rather than
+/// extending it, so the file must hold every trust anchor this client needs.
+///
 /// # Errors
 ///
 /// Returns `OracleError::Nats` if the connection fails.
+// `skip(config)`: NatsConfig derives Debug and holds `token` / `password`, so
+// instrumenting it without the skip would write credentials to the log.
+#[instrument(skip(config))]
 pub async fn connect_nats(config: &NatsConfig) -> Result<async_nats::Client, OracleError> {
     // Extract credentials from URLs if embedded.
     let mut url_user = None;
@@ -78,10 +89,38 @@ pub async fn connect_nats(config: &NatsConfig) -> Result<async_nats::Client, Ora
     }
 
     // TLS support.
-    // Note: tls_ca_file / tls_cert_file / tls_key_file are parsed by the config model
-    // but not yet wired into ConnectOptions — only tls_required is applied here.
+    //
+    // `require_tls` reflects the explicit `tls_required` flag, but certificate
+    // material is applied whenever it is configured: TLS also activates from a
+    // `tls://` URL scheme, in which case gating the certificates on the flag
+    // would silently drop a private CA and fail with `UnknownIssuer`.
     if config.tls_required == Some(true) {
         options = options.require_tls(true);
+    }
+    // Despite its name, `add_root_certificates` REPLACES the trust anchors:
+    // async-nats skips the platform root store entirely once a certificate file
+    // is set. The file must therefore contain every trust anchor the client
+    // needs — concatenate public roots into the bundle when the same client
+    // also talks to a publicly-signed broker.
+    if let Some(ref ca_file) = config.tls_ca_file {
+        info!(path = %ca_file, "loading NATS TLS root certificates");
+        options = options.add_root_certificates(PathBuf::from(ca_file));
+    }
+    match (&config.tls_cert_file, &config.tls_key_file) {
+        (Some(cert_file), Some(key_file)) => {
+            info!(cert = %cert_file, "loading NATS TLS client certificate");
+            options =
+                options.add_client_certificate(PathBuf::from(cert_file), PathBuf::from(key_file));
+        }
+        // Config validation rejects this, but `connect_nats` is public API and
+        // can be called without going through `load_config`.
+        (Some(_), None) | (None, Some(_)) => {
+            warn!(
+                "nats.tls_cert_file and nats.tls_key_file must both be set for client TLS; \
+                 ignoring the one that is set and connecting without client authentication"
+            );
+        }
+        (None, None) => {}
     }
 
     // Auth: URL-embedded credentials take priority, then explicit config fields.

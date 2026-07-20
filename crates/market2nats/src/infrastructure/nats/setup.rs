@@ -1,6 +1,7 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, warn};
 
 use crate::application::ports::{NatsError, NatsPublisher};
 use crate::config::model::NatsConfig;
@@ -39,6 +40,14 @@ fn extract_url_credentials(url: &str) -> (String, Option<(String, String)>) {
 /// or configured via the `auth`/`username`/`password` fields. URL-embedded
 /// credentials take priority.
 ///
+/// TLS is required when `tls.enabled` is `true`, and is also negotiated
+/// automatically for `tls://` URLs. `tls.ca_path` (private CA) and the
+/// `tls.cert_path` + `tls.key_path` pair (mTLS) are applied whenever they are
+/// configured, regardless of the `tls.enabled` flag.
+///
+/// Setting `tls.ca_path` **replaces** the platform root store rather than
+/// extending it, so the file must hold every trust anchor this client needs.
+///
 /// # Errors
 ///
 /// Returns `NatsError::ConnectionFailed` if the connection cannot be established.
@@ -67,8 +76,38 @@ pub async fn connect_nats(config: &NatsConfig) -> Result<async_nats::Client, Nat
         .ping_interval(Duration::from_secs(config.ping_interval_secs));
 
     // TLS support.
+    //
+    // `require_tls` reflects the explicit `tls.enabled` flag, but certificate
+    // material is applied whenever it is configured: TLS can also be activated
+    // by a `tls://` URL scheme, in which case gating the certificates on the
+    // flag would silently drop a private CA and fail with `UnknownIssuer`.
     if config.tls.enabled {
         options = options.require_tls(true);
+    }
+    // Despite its name, `add_root_certificates` REPLACES the trust anchors:
+    // async-nats skips the platform root store entirely once a certificate file
+    // is set. The file must therefore contain every trust anchor the client
+    // needs — concatenate public roots into the bundle when the same client
+    // also talks to a publicly-signed broker.
+    if let Some(ref ca_path) = config.tls.ca_path {
+        info!(path = %ca_path, "loading nats tls root certificates");
+        options = options.add_root_certificates(PathBuf::from(ca_path));
+    }
+    match (&config.tls.cert_path, &config.tls.key_path) {
+        (Some(cert_path), Some(key_path)) => {
+            info!(cert = %cert_path, "loading nats tls client certificate");
+            options =
+                options.add_client_certificate(PathBuf::from(cert_path), PathBuf::from(key_path));
+        }
+        // Config validation rejects this, but `connect_nats` is public API and
+        // can be called without going through `load_config`.
+        (Some(_), None) | (None, Some(_)) => {
+            warn!(
+                "nats.tls.cert_path and nats.tls.key_path must both be set for client TLS; \
+                 ignoring the one that is set and connecting without client authentication"
+            );
+        }
+        (None, None) => {}
     }
 
     // Auth: URL-embedded credentials take priority, then explicit config fields.

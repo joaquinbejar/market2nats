@@ -6,6 +6,15 @@ http_port = 9091
 
 [nats]
 urls = ["${NATS_URL:-nats://localhost:4222}"]
+# Private-CA broker: point tls_ca_file at the PEM bundle. It REPLACES the system
+# root store, so include public roots in the bundle if this client also talks to
+# a publicly-signed broker. tls_cert_file/tls_key_file enable mTLS and must be
+# set together. All paths must be readable files at startup or the process
+# aborts. Note these are flat keys here, unlike market2nats' [nats.tls] table.
+# tls_required  = true
+# tls_ca_file   = "/etc/oracle/tls/ca.pem"
+# tls_cert_file = "/etc/oracle/tls/client.crt"
+# tls_key_file  = "/etc/oracle/tls/client.key"
 
 [[subscriptions]]
 symbol = "BTC/USDT"
