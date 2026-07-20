@@ -20,8 +20,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
 use tokio_rustls::TlsAcceptor;
+use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use tokio_rustls::rustls::{self, ServerConfig};
 use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
@@ -539,9 +539,11 @@ fn load_tls_config(cert_path: &str, key_path: &str) -> Result<ServerConfig, Orac
         .map_err(|e| OracleError::nats(format!("parse tls key {key_path}: {e}")))?
         .ok_or_else(|| OracleError::nats(format!("no private key found in {key_path}")))?;
 
-    // Install default crypto provider (ring) the first time this is reached.
-    // Idempotent: subsequent calls return Err which we ignore.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // Safety net for library consumers that never go through `main`, where the
+    // provider is installed at startup. Idempotent.
+    if crate::infrastructure::tls::install_crypto_provider() {
+        tracing::debug!("installed rustls crypto provider outside main");
+    }
 
     ServerConfig::builder()
         .with_no_client_auth()

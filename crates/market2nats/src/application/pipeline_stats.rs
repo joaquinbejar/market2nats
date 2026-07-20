@@ -136,7 +136,7 @@ impl PipelineStats {
         .increment(1);
     }
 
-    /// Logs a summary of all counters and returns totals.
+    /// Logs a summary of all counters.
     pub fn log_summary(&self) {
         let uptime = self.started_at.elapsed();
         let uptime_secs = uptime.as_secs();
@@ -170,11 +170,8 @@ impl PipelineStats {
             total_pub_errors += pub_errors;
             total_ser_errors += ser_errors;
 
-            let rate = if uptime_secs > 0 {
-                received / uptime_secs
-            } else {
-                *received
-            };
+            // Uptime of 0 seconds: report the raw count as the rate.
+            let rate = received.checked_div(uptime_secs).unwrap_or(*received);
 
             info!(
                 venue = %key.venue,
@@ -188,11 +185,9 @@ impl PipelineStats {
             );
         }
 
-        let total_rate = if uptime_secs > 0 {
-            total_received / uptime_secs
-        } else {
-            total_received
-        };
+        let total_rate = total_received
+            .checked_div(uptime_secs)
+            .unwrap_or(total_received);
 
         info!(
             uptime_secs = uptime_secs,

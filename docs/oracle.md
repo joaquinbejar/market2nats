@@ -237,7 +237,12 @@ tls_key_file  = "/etc/oracle/tls/server.key"
 
 Implementation notes:
 
-- TLS is terminated with `tokio-rustls` (rustls + ring crypto provider).
+- TLS is terminated with `tokio-rustls` (rustls + ring crypto provider). The
+  provider is installed as the process-level default in `main` via
+  `infrastructure::install_crypto_provider`, before any TLS handshake — rustls
+  cannot select one automatically because both `ring` and `aws-lc-rs` reach the
+  build through transitive dependencies. `load_tls_config` repeats the call as
+  an idempotent safety net for library consumers that bypass `main`.
 - The cert file may contain a chain (multiple `BEGIN CERTIFICATE` blocks).
 - The key file accepts PKCS#8, RSA (`BEGIN RSA PRIVATE KEY`), or EC private
   keys in PEM form.

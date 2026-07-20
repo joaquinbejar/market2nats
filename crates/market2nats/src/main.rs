@@ -11,6 +11,7 @@ use market2nats::application::{
 };
 use market2nats::config;
 use market2nats::infrastructure::http::{HttpState, start_http_server};
+use market2nats::infrastructure::install_crypto_provider;
 use market2nats::infrastructure::nats::{JetStreamPublisher, connect_nats, setup_jetstream};
 use market2nats::infrastructure::ws::GenericWsAdapter;
 use market2nats::serialization::{self, SerializationFormat};
@@ -26,10 +27,17 @@ enum ServiceError {
     Serialization(#[from] serialization::SerializeError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("metrics: {0}")]
+    Metrics(String),
 }
 
 #[tokio::main]
 async fn main() -> Result<(), ServiceError> {
+    // rustls 0.23 cannot pick a crypto provider on its own here (both `ring`
+    // and `aws-lc-rs` are in the dependency graph). Install it before any TLS
+    // handshake, otherwise a `tls://` NATS connection panics.
+    let _ = install_crypto_provider();
+
     // Load config.
     let config_path = std::env::args()
         .nth(1)
@@ -57,7 +65,7 @@ async fn main() -> Result<(), ServiceError> {
     // Install Prometheus metrics recorder and register metric descriptions.
     let metrics_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
         .install_recorder()
-        .expect("failed to install prometheus recorder");
+        .map_err(|e| ServiceError::Metrics(format!("failed to install metrics recorder: {e}")))?;
     register_metrics();
 
     // Shared components.
