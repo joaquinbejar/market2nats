@@ -851,7 +851,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustls",
- "rustls-native-certs",
  "tokio",
  "tokio-rustls",
  "tower-service",
@@ -1232,19 +1231,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3589659543c04c7dc5526ec858591015b87cd8746583b51b48ef4353f99dbcda"
 dependencies = [
  "base64",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
  "indexmap",
- "ipnet",
  "metrics",
  "metrics-util",
  "quanta",
- "rustls",
  "thiserror 2.0.18",
- "tokio",
- "tracing",
 ]
 
 [[package]]
