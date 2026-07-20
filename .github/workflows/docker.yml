@@ -158,10 +158,15 @@ jobs:
 
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
-            MAJOR="${VERSION%%.*}"
             MINOR="${VERSION%.*}"
 
-            for tag in "${VERSION}" "${MINOR}" "${MAJOR}"; do
+            # Only VERSION and MINOR: the build job tags per-platform images with
+            # `{{version}}` and `{{major}}.{{minor}}` but never `{{major}}`, so a
+            # major-only manifest has no `-linux-amd64` / `-linux-arm64` sources
+            # and `docker manifest create` fails with `manifest unknown`. A
+            # floating `:0` tag would also be meaningless while the project is on
+            # 0.x, where every release may break compatibility.
+            for tag in "${VERSION}" "${MINOR}"; do
               docker manifest create "${IMAGE}:${tag}" \
                 "${IMAGE}:${tag}-linux-amd64" \
                 "${IMAGE}:${tag}-linux-arm64"
