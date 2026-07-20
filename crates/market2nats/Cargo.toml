@@ -1,6 +1,6 @@
 [package]
 name = "market2nats"
-version = "0.171.9"
+version = "0.171.10"
 edition.workspace = true
 description = "WebSocket market data → NATS JetStream relay"
 license = "MIT"

@@ -54,7 +54,10 @@ axum = "0.8"
 futures-util = "0.3"
 url = "2"
 # Internal crates
-market2nats-domain = { path = "crates/market2nats-domain" }
+# `version` is required for `cargo package` / `cargo publish`: the path is
+# stripped from the published manifest and the crates.io version is used
+# instead. Keep it in lockstep with the crate versions on every release.
+market2nats-domain = { path = "crates/market2nats-domain", version = "0.171.10" }
 # Dev/test
 tokio-test = "0.4"
 reqwest = { version = "0.13", features = ["json"] }

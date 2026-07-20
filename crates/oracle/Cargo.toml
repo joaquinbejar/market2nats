@@ -1,10 +1,14 @@
 [package]
 name = "oracle"
-version = "0.171.9"
+version = "0.171.10"
 edition.workspace = true
 description = "Aggregated oracle price computation from multi-venue trade data"
 license = "MIT"
 repository = "https://github.com/joaquinbejar/market2nats"
+# Not published: the `oracle` name on crates.io belongs to an unrelated crate
+# (kubo/rust-oracle, an Oracle DB binding). This stays a workspace-internal
+# crate, built and shipped as a Docker image like before.
+publish = false
 
 [features]
 default = ["config"]
