@@ -18,6 +18,7 @@ use oracle::config::builder::build_pipeline;
 use oracle::domain::OracleError;
 use oracle::infrastructure::{
     FanOutPublisher, NatsTradeSubscriber, OraclePricePublisher, OracleWsServer, connect_nats,
+    install_crypto_provider,
 };
 
 /// Service error aggregating all layer errors for the oracle binary.
@@ -39,6 +40,11 @@ enum ServiceError {
 
 #[tokio::main]
 async fn main() -> Result<(), ServiceError> {
+    // rustls 0.23 cannot pick a crypto provider on its own here (both `ring`
+    // and `aws-lc-rs` are in the dependency graph). Install it before any TLS
+    // handshake, otherwise a `tls://` NATS connection panics.
+    let _ = install_crypto_provider();
+
     let config_path = std::env::args()
         .nth(1)
         .or_else(|| std::env::var("ORACLE_CONFIG").ok())

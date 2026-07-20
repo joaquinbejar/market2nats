@@ -1174,6 +1174,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tokio-test",
  "tokio-tungstenite",
  "toml",

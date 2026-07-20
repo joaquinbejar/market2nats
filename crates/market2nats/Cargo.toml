@@ -15,6 +15,7 @@ market2nats-domain = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 async-nats = { workspace = true }
+tokio-rustls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
