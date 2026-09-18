@@ -189,7 +189,7 @@ async fn test_end_to_end_mock_to_nats() {
     publisher
         .ensure_stream(&StreamConfig {
             name: stream_name.clone(),
-            subjects: vec![format!("market.mock_venue.*.trade")],
+            subjects: vec!["market.mock_venue.*.trade".to_string()],
             storage: "memory".to_owned(),
             retention: "limits".to_owned(),
             max_age_secs: 60,
@@ -292,8 +292,8 @@ async fn test_end_to_end_multiple_venues() {
         .ensure_stream(&StreamConfig {
             name: stream_name.clone(),
             subjects: vec![
-                format!("market.venue_a.*.trade"),
-                format!("market.venue_b.*.trade"),
+                "market.venue_a.*.trade".to_string(),
+                "market.venue_b.*.trade".to_string(),
             ],
             storage: "memory".to_owned(),
             retention: "limits".to_owned(),
@@ -391,7 +391,7 @@ async fn test_end_to_end_sequence_assignment() {
     publisher
         .ensure_stream(&StreamConfig {
             name: stream_name.clone(),
-            subjects: vec![format!("market.seq_venue.*.trade")],
+            subjects: vec!["market.seq_venue.*.trade".to_string()],
             storage: "memory".to_owned(),
             retention: "limits".to_owned(),
             max_age_secs: 60,
