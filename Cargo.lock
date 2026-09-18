@@ -1192,7 +1192,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "market2nats"
-version = "0.171.10"
+version = "0.171.11"
 dependencies = [
  "async-nats",
  "axum",
@@ -1224,7 +1224,7 @@ dependencies = [
 
 [[package]]
 name = "market2nats-domain"
-version = "0.171.10"
+version = "0.171.11"
 dependencies = [
  "rust_decimal",
  "rust_decimal_macros",
@@ -1462,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "oracle"
-version = "0.171.10"
+version = "0.171.11"
 dependencies = [
  "async-nats",
  "axum",
